@@ -21,14 +21,22 @@ import android.os.Bundle;
 import android.view.Menu;
 import android.view.MenuItem;
 
-import org.thoughtcrime.securesms.conversation.ConversationActivity;
+import androidx.appcompat.app.AlertDialog;
+
+import org.signal.core.util.logging.Log;
+import org.thoughtcrime.securesms.contacts.sync.DirectoryHelper;
+import org.thoughtcrime.securesms.conversation.ConversationIntents;
 import org.thoughtcrime.securesms.database.DatabaseFactory;
-import org.thoughtcrime.securesms.database.ThreadDatabase;
 import org.thoughtcrime.securesms.groups.ui.creategroup.CreateGroupActivity;
-import org.thoughtcrime.securesms.logging.Log;
+import org.thoughtcrime.securesms.jobmanager.impl.NetworkConstraint;
 import org.thoughtcrime.securesms.recipients.Recipient;
 import org.thoughtcrime.securesms.recipients.RecipientId;
+import org.thoughtcrime.securesms.util.TextSecurePreferences;
+import org.thoughtcrime.securesms.util.concurrent.SimpleTask;
+import org.thoughtcrime.securesms.util.views.SimpleProgressDialog;
 import org.whispersystems.libsignal.util.guava.Optional;
+
+import java.io.IOException;
 
 /**
  * Activity container for starting a new conversation.
@@ -51,27 +59,51 @@ public class NewConversationActivity extends ContactSelectionActivity
   }
 
   @Override
-  public void onContactSelected(Optional<RecipientId> recipientId, String number) {
-    Recipient recipient;
+  public boolean onBeforeContactSelected(Optional<RecipientId> recipientId, String number) {
     if (recipientId.isPresent()) {
-      recipient = Recipient.resolved(recipientId.get());
+      launch(Recipient.resolved(recipientId.get()));
     } else {
       Log.i(TAG, "[onContactSelected] Maybe creating a new recipient.");
-      recipient = Recipient.external(this, number);
+
+      if (TextSecurePreferences.isPushRegistered(this) && NetworkConstraint.isMet(this)) {
+        Log.i(TAG, "[onContactSelected] Doing contact refresh.");
+
+        AlertDialog progress = SimpleProgressDialog.show(this);
+
+        SimpleTask.run(getLifecycle(), () -> {
+          Recipient resolved = Recipient.external(this, number);
+
+          if (!resolved.isRegistered() || !resolved.hasUuid()) {
+            Log.i(TAG, "[onContactSelected] Not registered or no UUID. Doing a directory refresh.");
+            try {
+              DirectoryHelper.refreshDirectoryFor(this, resolved, false);
+              resolved = Recipient.resolved(resolved.getId());
+            } catch (IOException e) {
+              Log.w(TAG, "[onContactSelected] Failed to refresh directory for new contact.");
+            }
+          }
+
+          return resolved;
+        }, resolved -> {
+          progress.dismiss();
+          launch(resolved);
+        });
+      } else {
+        launch(Recipient.external(this, number));
+      }
     }
-    launch(recipient);
+
+    return true;
   }
 
   private void launch(Recipient recipient) {
-    Intent intent = new Intent(this, ConversationActivity.class);
-    intent.putExtra(ConversationActivity.RECIPIENT_EXTRA, recipient.getId());
-    intent.putExtra(ConversationActivity.TEXT_EXTRA, getIntent().getStringExtra(ConversationActivity.TEXT_EXTRA));
-    intent.setDataAndType(getIntent().getData(), getIntent().getType());
+    long   existingThread = DatabaseFactory.getThreadDatabase(this).getThreadIdIfExistsFor(recipient.getId());
+    Intent intent         = ConversationIntents.createBuilder(this, recipient.getId(), existingThread)
+                                               .withDraftText(getIntent().getStringExtra(Intent.EXTRA_TEXT))
+                                               .withDataUri(getIntent().getData())
+                                               .withDataType(getIntent().getType())
+                                               .build();
 
-    long existingThread = DatabaseFactory.getThreadDatabase(this).getThreadIdIfExistsFor(recipient);
-
-    intent.putExtra(ConversationActivity.THREAD_ID_EXTRA, existingThread);
-    intent.putExtra(ConversationActivity.DISTRIBUTION_TYPE_EXTRA, ThreadDatabase.DistributionTypes.DEFAULT);
     startActivity(intent);
     finish();
   }
@@ -104,11 +136,11 @@ public class NewConversationActivity extends ContactSelectionActivity
   }
 
   @Override
-  public boolean onPrepareOptionsMenu(Menu menu) {
+  public boolean onCreateOptionsMenu(Menu menu) {
     menu.clear();
     getMenuInflater().inflate(R.menu.new_conversation_activity, menu);
 
-    super.onPrepareOptionsMenu(menu);
+    super.onCreateOptionsMenu(menu);
     return true;
   }
 

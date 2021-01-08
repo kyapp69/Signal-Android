@@ -3,7 +3,7 @@ package org.thoughtcrime.securesms.recipients;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import org.thoughtcrime.securesms.logging.Log;
+import org.signal.core.util.logging.Log;
 import org.whispersystems.libsignal.util.guava.Optional;
 
 import java.util.LinkedHashMap;
@@ -69,5 +69,9 @@ final class RecipientIdCache {
     }
 
     return null;
+  }
+
+  synchronized void clear() {
+    ids.clear();
   }
 }

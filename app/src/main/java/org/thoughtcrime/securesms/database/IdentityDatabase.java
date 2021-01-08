@@ -23,8 +23,6 @@ import android.database.Cursor;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import net.sqlcipher.database.SQLiteDatabase;
-
 import org.greenrobot.eventbus.EventBus;
 import org.thoughtcrime.securesms.database.helpers.SQLCipherOpenHelper;
 import org.thoughtcrime.securesms.database.identity.IdentityRecordList;
@@ -37,6 +35,7 @@ import org.whispersystems.libsignal.InvalidKeyException;
 import org.whispersystems.libsignal.util.guava.Optional;
 
 import java.io.IOException;
+import java.util.LinkedList;
 import java.util.List;
 
 public class IdentityDatabase extends Database {
@@ -115,9 +114,9 @@ public class IdentityDatabase extends Database {
   }
 
   public @NonNull IdentityRecordList getIdentities(@NonNull List<Recipient> recipients) {
-    IdentityRecordList identityRecordList = new IdentityRecordList();
-    SQLiteDatabase     database           = databaseHelper.getReadableDatabase();
-    String[]           selectionArgs      = new String[1];
+    List<IdentityRecord> records       = new LinkedList<>();
+    SQLiteDatabase       database      = databaseHelper.getReadableDatabase();
+    String[]             selectionArgs = new String[1];
 
     database.beginTransaction();
     try {
@@ -126,7 +125,7 @@ public class IdentityDatabase extends Database {
 
         try (Cursor cursor = database.query(TABLE_NAME, null, RECIPIENT_ID + " = ?", selectionArgs, null, null, null)) {
           if (cursor.moveToFirst()) {
-            identityRecordList.add(getIdentityRecord(cursor));
+            records.add(getIdentityRecord(cursor));
           }
         } catch (InvalidKeyException | IOException e) {
           throw new AssertionError(e);
@@ -136,7 +135,7 @@ public class IdentityDatabase extends Database {
       database.endTransaction();
     }
 
-    return identityRecordList;
+    return new IdentityRecordList(records);
   }
 
   public void saveIdentity(@NonNull RecipientId recipientId, IdentityKey identityKey, VerifiedStatus verifiedStatus,
@@ -179,7 +178,7 @@ public class IdentityDatabase extends Database {
     boolean statusMatches = keyMatches && hasMatchingStatus(id, identityKey, verifiedStatus);
 
     if (!keyMatches || !statusMatches) {
-      saveIdentityInternal(id, identityKey, verifiedStatus, false, System.currentTimeMillis(), true);
+      saveIdentityInternal(id, identityKey, verifiedStatus, !hadEntry, System.currentTimeMillis(), true);
       Optional<IdentityRecord> record = getIdentity(id);
       if (record.isPresent()) EventBus.getDefault().post(record.get());
     }

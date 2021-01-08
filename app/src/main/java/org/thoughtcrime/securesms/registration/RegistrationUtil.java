@@ -1,13 +1,16 @@
 package org.thoughtcrime.securesms.registration;
 
+import android.content.Context;
+
+import androidx.annotation.NonNull;
+
+import org.signal.core.util.logging.Log;
 import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
 import org.thoughtcrime.securesms.jobs.DirectoryRefreshJob;
 import org.thoughtcrime.securesms.jobs.StorageSyncJob;
 import org.thoughtcrime.securesms.keyvalue.SignalStore;
-import org.thoughtcrime.securesms.logging.Log;
 import org.thoughtcrime.securesms.recipients.Recipient;
-import org.thoughtcrime.securesms.storage.StorageSyncHelper;
-import org.whispersystems.signalservice.internal.storage.protos.SignalStorage;
+import org.thoughtcrime.securesms.util.TextSecurePreferences;
 
 public final class RegistrationUtil {
 
@@ -20,8 +23,12 @@ public final class RegistrationUtil {
    * path a user has taken. This will only truly mark registration as complete if all of the
    * requirements are met.
    */
-  public static void markRegistrationPossiblyComplete() {
-    if (!SignalStore.registrationValues().isRegistrationComplete() && SignalStore.kbsValues().hasPin() && !Recipient.self().getProfileName().isEmpty()) {
+  public static void maybeMarkRegistrationComplete(@NonNull Context context) {
+    if (!SignalStore.registrationValues().isRegistrationComplete() &&
+        TextSecurePreferences.isPushRegistered(context)            &&
+        !Recipient.self().getProfileName().isEmpty()               &&
+        (SignalStore.kbsValues().hasPin() || SignalStore.kbsValues().hasOptedOut()))
+    {
       Log.i(TAG, "Marking registration completed.", new Throwable());
       SignalStore.registrationValues().setRegistrationComplete();
       ApplicationDependencies.getJobManager().startChain(new StorageSyncJob())

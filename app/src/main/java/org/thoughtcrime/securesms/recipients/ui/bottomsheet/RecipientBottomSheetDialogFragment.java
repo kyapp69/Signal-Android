@@ -2,6 +2,7 @@ package org.thoughtcrime.securesms.recipients.ui.bottomsheet;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.res.ColorStateList;
 import android.os.Bundle;
 import android.text.TextUtils;
 import android.view.LayoutInflater;
@@ -14,9 +15,10 @@ import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.core.content.ContextCompat;
+import androidx.core.widget.TextViewCompat;
 import androidx.fragment.app.DialogFragment;
 import androidx.fragment.app.FragmentManager;
-import androidx.fragment.app.FragmentTransaction;
 import androidx.lifecycle.ViewModelProviders;
 
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment;
@@ -26,13 +28,16 @@ import org.thoughtcrime.securesms.components.AvatarImageView;
 import org.thoughtcrime.securesms.contacts.avatars.FallbackContactPhoto;
 import org.thoughtcrime.securesms.contacts.avatars.FallbackPhoto80dp;
 import org.thoughtcrime.securesms.groups.GroupId;
+import org.thoughtcrime.securesms.phonenumbers.PhoneNumberFormatter;
 import org.thoughtcrime.securesms.recipients.Recipient;
 import org.thoughtcrime.securesms.recipients.RecipientExporter;
 import org.thoughtcrime.securesms.recipients.RecipientId;
-import org.thoughtcrime.securesms.util.CommunicationActions;
+import org.thoughtcrime.securesms.recipients.RecipientUtil;
+import org.thoughtcrime.securesms.util.BottomSheetUtil;
 import org.thoughtcrime.securesms.util.ServiceUtil;
 import org.thoughtcrime.securesms.util.ThemeUtil;
 import org.thoughtcrime.securesms.util.Util;
+import org.thoughtcrime.securesms.util.ViewUtil;
 
 import java.util.Objects;
 
@@ -85,8 +90,8 @@ public final class RecipientBottomSheetDialogFragment extends BottomSheetDialogF
   @Override
   public void onCreate(@Nullable Bundle savedInstanceState) {
     setStyle(DialogFragment.STYLE_NORMAL,
-             ThemeUtil.isDarkTheme(requireContext()) ? R.style.Theme_Signal_RecipientBottomSheet
-                                                     : R.style.Theme_Signal_RecipientBottomSheet_Light);
+             ThemeUtil.isDarkTheme(requireContext()) ? R.style.Theme_Signal_RoundedBottomSheet
+                                                     : R.style.Theme_Signal_RoundedBottomSheet_Light);
 
     super.onCreate(savedInstanceState);
   }
@@ -132,24 +137,29 @@ public final class RecipientBottomSheetDialogFragment extends BottomSheetDialogF
       avatar.setFallbackPhotoProvider(new Recipient.FallbackPhotoProvider() {
         @Override
         public @NonNull FallbackContactPhoto getPhotoForLocalNumber() {
-          return new FallbackPhoto80dp(R.drawable.ic_note_80, recipient.getColor());
+          return new FallbackPhoto80dp(R.drawable.ic_note_80, recipient.getColor().toAvatarColor(requireContext()));
         }
       });
       avatar.setAvatar(recipient);
-      if (recipient.isLocalNumber()) {
+      if (recipient.isSelf()) {
         avatar.setOnClickListener(v -> {
           dismiss();
           viewModel.onMessageClicked(requireActivity());
         });
       }
 
-      String name = recipient.isLocalNumber() ? requireContext().getString(R.string.note_to_self)
+      String name = recipient.isSelf() ? requireContext().getString(R.string.note_to_self)
                                               : recipient.getDisplayName(requireContext());
       fullName.setText(name);
       fullName.setVisibility(TextUtils.isEmpty(name) ? View.GONE : View.VISIBLE);
+      if (recipient.isSystemContact() && !recipient.isSelf()) {
+        fullName.setCompoundDrawablesRelativeWithIntrinsicBounds(0, 0, R.drawable.ic_profile_circle_outline_16, 0);
+        fullName.setCompoundDrawablePadding(ViewUtil.dpToPx(4));
+        TextViewCompat.setCompoundDrawableTintList(fullName, ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.signal_text_primary)));
+      }
 
-      String usernameNumberString = recipient.hasAUserSetDisplayName(requireContext()) && !recipient.isLocalNumber()
-                                    ? String.format("%s %s", recipient.getUsername().or(""), recipient.getSmsAddress().or("")).trim()
+      String usernameNumberString = recipient.hasAUserSetDisplayName(requireContext()) && !recipient.isSelf()
+                                    ? recipient.getSmsAddress().transform(PhoneNumberFormatter::prettyPrint).or("").trim()
                                     : "";
       usernameNumber.setText(usernameNumberString);
       usernameNumber.setVisibility(TextUtils.isEmpty(usernameNumberString) ? View.GONE : View.VISIBLE);
@@ -160,18 +170,24 @@ public final class RecipientBottomSheetDialogFragment extends BottomSheetDialogF
         return true;
       });
 
-      noteToSelfDescription.setVisibility(recipient.isLocalNumber() ? View.VISIBLE : View.GONE);
+      noteToSelfDescription.setVisibility(recipient.isSelf() ? View.VISIBLE : View.GONE);
 
-      boolean blocked = recipient.isBlocked();
-      blockButton  .setVisibility(recipient.isLocalNumber() ||  blocked ? View.GONE : View.VISIBLE);
-      unblockButton.setVisibility(recipient.isLocalNumber() || !blocked ? View.GONE : View.VISIBLE);
+      if (RecipientUtil.isBlockable(recipient)) {
+        boolean blocked = recipient.isBlocked();
 
-      messageButton.setVisibility(!recipient.isLocalNumber() ? View.VISIBLE : View.GONE);
-      secureCallButton.setVisibility(recipient.isRegistered() && !recipient.isLocalNumber() ? View.VISIBLE : View.GONE);
-      insecureCallButton.setVisibility(!recipient.isRegistered() && !recipient.isLocalNumber() ? View.VISIBLE : View.GONE);
-      secureVideoCallButton.setVisibility(recipient.isRegistered() && !recipient.isLocalNumber() ? View.VISIBLE : View.GONE);
+        blockButton  .setVisibility(recipient.isSelf() ||  blocked ? View.GONE : View.VISIBLE);
+        unblockButton.setVisibility(recipient.isSelf() || !blocked ? View.GONE : View.VISIBLE);
+      } else {
+        blockButton  .setVisibility(View.GONE);
+        unblockButton.setVisibility(View.GONE);
+      }
 
-      if (recipient.isSystemContact() || recipient.isGroup() || recipient.isLocalNumber()) {
+      messageButton.setVisibility(!recipient.isSelf() ? View.VISIBLE : View.GONE);
+      secureCallButton.setVisibility(recipient.isRegistered() && !recipient.isSelf() ? View.VISIBLE : View.GONE);
+      insecureCallButton.setVisibility(!recipient.isRegistered() && !recipient.isSelf() ? View.VISIBLE : View.GONE);
+      secureVideoCallButton.setVisibility(recipient.isRegistered() && !recipient.isSelf() ? View.VISIBLE : View.GONE);
+
+      if (recipient.isSystemContact() || recipient.isGroup() || recipient.isSelf()) {
         addContactButton.setVisibility(View.GONE);
       } else {
         addContactButton.setVisibility(View.VISIBLE);
@@ -179,9 +195,11 @@ public final class RecipientBottomSheetDialogFragment extends BottomSheetDialogF
           startActivityForResult(RecipientExporter.export(recipient).asAddContactIntent(), REQUEST_CODE_ADD_CONTACT);
         });
       }
+    });
 
+    viewModel.getCanAddToAGroup().observe(getViewLifecycleOwner(), canAdd -> {
       addToGroupButton.setText(groupId == null ? R.string.RecipientBottomSheet_add_to_a_group : R.string.RecipientBottomSheet_add_to_another_group);
-      addToGroupButton.setVisibility(recipient.isRegistered() && !recipient.isGroup() && !recipient.isLocalNumber() ? View.VISIBLE : View.GONE);
+      addToGroupButton.setVisibility(canAdd ? View.VISIBLE : View.GONE);
     });
 
     viewModel.getAdminActionStatus().observe(getViewLifecycleOwner(), adminStatus -> {
@@ -246,8 +264,6 @@ public final class RecipientBottomSheetDialogFragment extends BottomSheetDialogF
 
   @Override
   public void show(@NonNull FragmentManager manager, @Nullable String tag) {
-    FragmentTransaction transaction = manager.beginTransaction();
-    transaction.add(this, tag);
-    transaction.commitAllowingStateLoss();
+    BottomSheetUtil.show(manager, tag, this);
   }
 }

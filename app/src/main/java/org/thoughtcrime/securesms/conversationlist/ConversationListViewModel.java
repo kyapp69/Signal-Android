@@ -1,8 +1,6 @@
 package org.thoughtcrime.securesms.conversationlist;
 
 import android.app.Application;
-import android.database.ContentObserver;
-import android.os.Handler;
 import android.text.TextUtils;
 
 import androidx.annotation.NonNull;
@@ -10,14 +8,15 @@ import androidx.lifecycle.LiveData;
 import androidx.lifecycle.MutableLiveData;
 import androidx.lifecycle.ViewModel;
 import androidx.lifecycle.ViewModelProvider;
-import androidx.paging.DataSource;
-import androidx.paging.LivePagedListBuilder;
-import androidx.paging.PagedList;
 
+import org.signal.core.util.logging.Log;
+import org.signal.paging.PagedData;
+import org.signal.paging.PagingConfig;
+import org.signal.paging.PagingController;
 import org.thoughtcrime.securesms.conversationlist.model.Conversation;
 import org.thoughtcrime.securesms.conversationlist.model.SearchResult;
-import org.thoughtcrime.securesms.database.DatabaseContentProviders;
 import org.thoughtcrime.securesms.database.DatabaseFactory;
+import org.thoughtcrime.securesms.database.DatabaseObserver;
 import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
 import org.thoughtcrime.securesms.megaphone.Megaphone;
 import org.thoughtcrime.securesms.megaphone.MegaphoneRepository;
@@ -25,67 +24,64 @@ import org.thoughtcrime.securesms.megaphone.Megaphones;
 import org.thoughtcrime.securesms.search.SearchRepository;
 import org.thoughtcrime.securesms.util.Debouncer;
 import org.thoughtcrime.securesms.util.Util;
-import org.thoughtcrime.securesms.util.concurrent.SignalExecutors;
 import org.thoughtcrime.securesms.util.livedata.LiveDataUtil;
 import org.thoughtcrime.securesms.util.paging.Invalidator;
 
+import java.util.List;
+
 class ConversationListViewModel extends ViewModel {
 
-  private final Application                   application;
-  private final MutableLiveData<Megaphone>    megaphone;
-  private final MutableLiveData<SearchResult> searchResult;
-  private final MutableLiveData<Integer>      archivedCount;
-  private final LiveData<ConversationList>    conversationList;
-  private final SearchRepository              searchRepository;
-  private final MegaphoneRepository           megaphoneRepository;
-  private final Debouncer                     debouncer;
-  private final ContentObserver               observer;
-  private final Invalidator                   invalidator;
+  private static final String TAG = Log.tag(ConversationListViewModel.class);
+
+  private static boolean coldStart = true;
+
+  private final MutableLiveData<Megaphone>     megaphone;
+  private final MutableLiveData<SearchResult>  searchResult;
+  private final PagedData<Conversation>        pagedData;
+  private final LiveData<Boolean>              hasNoConversations;
+  private final SearchRepository               searchRepository;
+  private final MegaphoneRepository            megaphoneRepository;
+  private final Debouncer                      debouncer;
+  private final DatabaseObserver.Observer      observer;
+  private final Invalidator                    invalidator;
 
   private String lastQuery;
+  private int    pinnedCount;
 
   private ConversationListViewModel(@NonNull Application application, @NonNull SearchRepository searchRepository, boolean isArchived) {
-    this.application         = application;
     this.megaphone           = new MutableLiveData<>();
     this.searchResult        = new MutableLiveData<>();
-    this.archivedCount       = new MutableLiveData<>();
     this.searchRepository    = searchRepository;
     this.megaphoneRepository = ApplicationDependencies.getMegaphoneRepository();
     this.debouncer           = new Debouncer(300);
     this.invalidator         = new Invalidator();
-    this.observer            = new ContentObserver(new Handler()) {
-      @Override
-      public void onChange(boolean selfChange) {
-        if (!TextUtils.isEmpty(getLastQuery())) {
-          searchRepository.query(getLastQuery(), searchResult::postValue);
-        }
-
-        if (!isArchived) {
-          updateArchivedCount();
-        }
+    this.pagedData           = PagedData.create(ConversationListDataSource.create(application, isArchived),
+                                                new PagingConfig.Builder()
+                                                                .setPageSize(15)
+                                                                .setBufferPages(2)
+                                                                .build());
+    this.observer            = () -> {
+      if (!TextUtils.isEmpty(getLastQuery())) {
+        searchRepository.query(getLastQuery(), searchResult::postValue);
       }
+      pagedData.getController().onDataInvalidated();
     };
 
-    DataSource.Factory<Integer, Conversation> factory = new ConversationListDataSource.Factory(application, invalidator, isArchived);
-    PagedList.Config                          config  = new PagedList.Config.Builder()
-                                                                            .setPageSize(15)
-                                                                            .setInitialLoadSizeHint(30)
-                                                                            .setEnablePlaceholders(true)
-                                                                            .build();
+    this.hasNoConversations = LiveDataUtil.mapAsync(pagedData.getData(), conversations -> {
+      pinnedCount = DatabaseFactory.getThreadDatabase(application).getPinnedConversationListCount();
 
-    LiveData<PagedList<Conversation>> conversationList = new LivePagedListBuilder<>(factory, config).setFetchExecutor(ConversationListDataSource.EXECUTOR)
-                                                                                                    .setInitialLoadKey(0)
-                                                                                                    .build();
+      if (conversations.size() > 0) {
+        return false;
+      } else {
+        return DatabaseFactory.getThreadDatabase(application).getArchivedConversationListCount() == 0;
+      }
+    });
 
-    if (isArchived) {
-      this.archivedCount.setValue(0);
-    } else {
-      updateArchivedCount();
-    }
+    ApplicationDependencies.getDatabaseObserver().registerConversationListObserver(observer);
+  }
 
-    application.getContentResolver().registerContentObserver(DatabaseContentProviders.ConversationList.CONTENT_URI, true, observer);
-
-    this.conversationList = LiveDataUtil.combineLatest(conversationList, this.archivedCount, ConversationList::new);
+  public LiveData<Boolean> hasNoConversations() {
+    return hasNoConversations;
   }
 
   @NonNull LiveData<SearchResult> getSearchResult() {
@@ -96,12 +92,26 @@ class ConversationListViewModel extends ViewModel {
     return megaphone;
   }
 
-  @NonNull LiveData<ConversationList> getConversationList() {
-    return conversationList;
+  @NonNull LiveData<List<Conversation>> getConversationList() {
+    return pagedData.getData();
+  }
+
+  @NonNull PagingController getPagingController() {
+    return pagedData.getController();
+  }
+
+  public int getPinnedCount() {
+    return pinnedCount;
   }
 
   void onVisible() {
     megaphoneRepository.getNextMegaphone(megaphone::postValue);
+
+    if (!coldStart) {
+      ApplicationDependencies.getDatabaseObserver().notifyConversationListListeners();
+    }
+
+    coldStart = false;
   }
 
   void onMegaphoneCompleted(@NonNull Megaphones.Event event) {
@@ -137,13 +147,7 @@ class ConversationListViewModel extends ViewModel {
   protected void onCleared() {
     invalidator.invalidate();
     debouncer.clear();
-    application.getContentResolver().unregisterContentObserver(observer);
-  }
-
-  private void updateArchivedCount() {
-    SignalExecutors.BOUNDED.execute(() -> {
-      archivedCount.postValue(DatabaseFactory.getThreadDatabase(application).getArchivedConversationListCount());
-    });
+    ApplicationDependencies.getDatabaseObserver().unregisterObserver(observer);
   }
 
   public static class Factory extends ViewModelProvider.NewInstanceFactory {
@@ -158,28 +162,6 @@ class ConversationListViewModel extends ViewModel {
     public @NonNull<T extends ViewModel> T create(@NonNull Class<T> modelClass) {
       //noinspection ConstantConditions
       return modelClass.cast(new ConversationListViewModel(ApplicationDependencies.getApplication(), new SearchRepository(), isArchived));
-    }
-  }
-
-  final static class ConversationList {
-    private final PagedList<Conversation> conversations;
-    private final int                     archivedCount;
-
-    ConversationList(PagedList<Conversation> conversations, int archivedCount) {
-      this.conversations = conversations;
-      this.archivedCount = archivedCount;
-    }
-
-    PagedList<Conversation> getConversations() {
-      return conversations;
-    }
-
-    int getArchivedCount() {
-      return archivedCount;
-    }
-
-    boolean isEmpty() {
-      return conversations.isEmpty() && archivedCount == 0;
     }
   }
 }

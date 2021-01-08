@@ -9,6 +9,7 @@ import android.provider.ContactsContract;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import org.signal.core.util.logging.Log;
 import org.signal.zkgroup.profiles.ProfileKey;
 import org.thoughtcrime.securesms.ApplicationContext;
 import org.thoughtcrime.securesms.crypto.ProfileKeyUtil;
@@ -19,7 +20,6 @@ import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
 import org.thoughtcrime.securesms.jobmanager.Data;
 import org.thoughtcrime.securesms.jobmanager.Job;
 import org.thoughtcrime.securesms.jobmanager.impl.NetworkConstraint;
-import org.thoughtcrime.securesms.logging.Log;
 import org.thoughtcrime.securesms.profiles.AvatarHelper;
 import org.thoughtcrime.securesms.providers.BlobProvider;
 import org.thoughtcrime.securesms.recipients.Recipient;
@@ -42,13 +42,9 @@ import org.whispersystems.signalservice.api.push.exceptions.PushNetworkException
 import org.whispersystems.signalservice.api.util.InvalidNumberException;
 
 import java.io.ByteArrayInputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.sql.Blob;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -259,14 +255,14 @@ public class MultiDeviceContactUpdateJob extends BaseJob {
       throws UntrustedIdentityException, NetworkException
   {
     if (length > 0) {
-      SignalServiceAttachmentStream attachmentStream   = SignalServiceAttachment.newStreamBuilder()
-                                                                                .withStream(stream)
-                                                                                .withContentType("application/octet-stream")
-                                                                                .withLength(length)
-                                                                                .build();
-
       try {
-        messageSender.sendMessage(SignalServiceSyncMessage.forContacts(new ContactsMessage(attachmentStream, complete)),
+        SignalServiceAttachmentStream.Builder attachmentStream = SignalServiceAttachment.newStreamBuilder()
+                                                                                        .withStream(stream)
+                                                                                        .withContentType("application/octet-stream")
+                                                                                        .withLength(length)
+                                                                                        .withResumableUploadSpec(messageSender.getResumableUploadSpec());
+
+        messageSender.sendMessage(SignalServiceSyncMessage.forContacts(new ContactsMessage(attachmentStream.build(), complete)),
                                   UnidentifiedAccessUtil.getAccessForSync(context));
       } catch (IOException ioe) {
         throw new NetworkException(ioe);
@@ -324,7 +320,7 @@ public class MultiDeviceContactUpdateJob extends BaseJob {
                                                 .withLength(fd.getLength())
                                                 .build());
     } catch (IOException e) {
-      Log.i(TAG, "Could not find avatar for URI: " + displayPhotoUri);
+      // Ignored
     }
 
     Uri photoUri = Uri.withAppendedPath(uri, ContactsContract.Contacts.Photo.CONTENT_DIRECTORY);
@@ -363,7 +359,7 @@ public class MultiDeviceContactUpdateJob extends BaseJob {
   private Optional<VerifiedMessage> getVerifiedMessage(Recipient recipient, Optional<IdentityDatabase.IdentityRecord> identity) throws InvalidNumberException {
     if (!identity.isPresent()) return Optional.absent();
 
-    SignalServiceAddress destination = RecipientUtil.toSignalServiceAddress(context, recipient);
+    SignalServiceAddress destination = RecipientUtil.toSignalServiceAddressBestEffort(context, recipient);
     IdentityKey          identityKey = identity.get().getIdentityKey();
 
     VerifiedMessage.VerifiedState state;

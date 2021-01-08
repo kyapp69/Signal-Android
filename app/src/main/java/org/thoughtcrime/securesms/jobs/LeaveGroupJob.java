@@ -6,13 +6,13 @@ import androidx.annotation.NonNull;
 
 import com.annimon.stream.Stream;
 
+import org.signal.core.util.logging.Log;
 import org.thoughtcrime.securesms.crypto.UnidentifiedAccessUtil;
 import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
 import org.thoughtcrime.securesms.groups.GroupId;
 import org.thoughtcrime.securesms.jobmanager.Data;
 import org.thoughtcrime.securesms.jobmanager.Job;
 import org.thoughtcrime.securesms.jobmanager.impl.NetworkConstraint;
-import org.thoughtcrime.securesms.logging.Log;
 import org.thoughtcrime.securesms.recipients.Recipient;
 import org.thoughtcrime.securesms.recipients.RecipientId;
 import org.thoughtcrime.securesms.recipients.RecipientUtil;
@@ -132,9 +132,9 @@ public class LeaveGroupJob extends BaseJob {
       throws IOException, UntrustedIdentityException
   {
     SignalServiceMessageSender             messageSender      = ApplicationDependencies.getSignalServiceMessageSender();
-    List<SignalServiceAddress>             addresses          = Stream.of(destinations).map(Recipient::resolved).map(t -> RecipientUtil.toSignalServiceAddress(context, t)).toList();
-    List<SignalServiceAddress>             memberAddresses    = Stream.of(members).map(Recipient::resolved).map(t -> RecipientUtil.toSignalServiceAddress(context, t)).toList();
-    List<Optional<UnidentifiedAccessPair>> unidentifiedAccess = Stream.of(destinations).map(Recipient::resolved).map(recipient -> UnidentifiedAccessUtil.getAccessFor(context, recipient)).toList();
+    List<SignalServiceAddress>             addresses          = RecipientUtil.toSignalServiceAddresses(context, destinations);
+    List<SignalServiceAddress>             memberAddresses    = RecipientUtil.toSignalServiceAddresses(context, members);
+    List<Optional<UnidentifiedAccessPair>> unidentifiedAccess = UnidentifiedAccessUtil.getAccessFor(context, Stream.of(destinations).map(Recipient::resolved).toList());
     SignalServiceGroup                     serviceGroup       = new SignalServiceGroup(SignalServiceGroup.Type.QUIT, groupId.getDecodedId(), name, memberAddresses, null);
     SignalServiceDataMessage.Builder       dataMessage        = SignalServiceDataMessage.newBuilder()
                                                                                         .withTimestamp(System.currentTimeMillis())
@@ -143,24 +143,7 @@ public class LeaveGroupJob extends BaseJob {
 
     List<SendMessageResult> results = messageSender.sendMessage(addresses, unidentifiedAccess, false, dataMessage.build());
 
-    Stream.of(results)
-          .filter(r -> r.getIdentityFailure() != null)
-          .map(SendMessageResult::getAddress)
-          .map(a -> Recipient.externalPush(context, a))
-          .forEach(r -> Log.w(TAG, "Identity failure for " + r.getId()));
-
-    Stream.of(results)
-          .filter(SendMessageResult::isUnregisteredFailure)
-          .map(SendMessageResult::getAddress)
-          .map(a -> Recipient.externalPush(context, a))
-          .forEach(r -> Log.w(TAG, "Unregistered failure for " + r.getId()));
-
-
-    return Stream.of(results)
-                 .filter(r -> r.getSuccess() != null || r.getIdentityFailure() != null || r.isUnregisteredFailure())
-                 .map(SendMessageResult::getAddress)
-                 .map(a -> Recipient.externalPush(context, a))
-                 .toList();
+    return GroupSendJobHelper.getCompletedSends(context, results);
   }
 
   public static class Factory implements Job.Factory<LeaveGroupJob> {

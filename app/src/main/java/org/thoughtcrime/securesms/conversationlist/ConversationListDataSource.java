@@ -1,116 +1,76 @@
 package org.thoughtcrime.securesms.conversationlist;
 
 import android.content.Context;
-import android.database.ContentObserver;
 import android.database.Cursor;
+import android.database.MatrixCursor;
+import android.database.MergeCursor;
 
 import androidx.annotation.NonNull;
-import androidx.paging.DataSource;
-import androidx.paging.PositionalDataSource;
+import androidx.annotation.VisibleForTesting;
 
+import org.signal.core.util.logging.Log;
+import org.signal.paging.PagedDataSource;
 import org.thoughtcrime.securesms.conversationlist.model.Conversation;
-import org.thoughtcrime.securesms.database.DatabaseContentProviders;
+import org.thoughtcrime.securesms.conversationlist.model.ConversationReader;
 import org.thoughtcrime.securesms.database.DatabaseFactory;
 import org.thoughtcrime.securesms.database.ThreadDatabase;
 import org.thoughtcrime.securesms.database.model.ThreadRecord;
 import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
-import org.thoughtcrime.securesms.logging.Log;
 import org.thoughtcrime.securesms.recipients.Recipient;
-import org.thoughtcrime.securesms.util.ThrottledDebouncer;
-import org.thoughtcrime.securesms.util.concurrent.SignalExecutors;
-import org.thoughtcrime.securesms.util.paging.Invalidator;
-import org.thoughtcrime.securesms.util.paging.SizeFixResult;
+import org.thoughtcrime.securesms.util.Stopwatch;
 
 import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.concurrent.Executor;
 
-abstract class ConversationListDataSource extends PositionalDataSource<Conversation> {
-
-  public static final Executor EXECUTOR = SignalExecutors.newFixedLifoThreadExecutor("signal-conversation-list", 1, 1);
-
-  private static final ThrottledDebouncer THROTTLER = new ThrottledDebouncer(500);
+abstract class ConversationListDataSource implements PagedDataSource<Conversation> {
 
   private static final String TAG = Log.tag(ConversationListDataSource.class);
 
   protected final ThreadDatabase threadDatabase;
 
-  protected ConversationListDataSource(@NonNull Context context, @NonNull Invalidator invalidator) {
+  protected ConversationListDataSource(@NonNull Context context) {
     this.threadDatabase = DatabaseFactory.getThreadDatabase(context);
-
-    ContentObserver contentObserver = new ContentObserver(null) {
-      @Override
-      public void onChange(boolean selfChange) {
-        THROTTLER.publish(() -> {
-          invalidate();
-          context.getContentResolver().unregisterContentObserver(this);
-        });
-      }
-    };
-
-    invalidator.observe(() -> {
-      invalidate();
-      context.getContentResolver().unregisterContentObserver(contentObserver);
-    });
-
-    context.getContentResolver().registerContentObserver(DatabaseContentProviders.ConversationList.CONTENT_URI,  true, contentObserver);
   }
 
-  private static ConversationListDataSource create(@NonNull Context context, @NonNull Invalidator invalidator, boolean isArchived) {
-    if (!isArchived) return new UnarchivedConversationListDataSource(context, invalidator);
-    else             return new ArchivedConversationListDataSource(context, invalidator);
+  public static ConversationListDataSource create(@NonNull Context context, boolean isArchived) {
+    if (!isArchived) return new UnarchivedConversationListDataSource(context);
+    else             return new ArchivedConversationListDataSource(context);
   }
 
   @Override
-  public final void loadInitial(@NonNull LoadInitialParams params, @NonNull LoadInitialCallback<Conversation> callback) {
-    long start = System.currentTimeMillis();
+  public int size() {
+    long startTime = System.currentTimeMillis();
+    int  count     = getTotalCount();
 
-    List<Conversation> conversations  = new ArrayList<>(params.requestedLoadSize);
-    int                totalCount     = getTotalCount();
-    int                effectiveCount = params.requestedStartPosition;
+    Log.d(TAG, "[size(), " + getClass().getSimpleName() + "] " + (System.currentTimeMillis() - startTime) + " ms");
+    return count;
+  }
+
+  @Override
+  public @NonNull List<Conversation> load(int start, int length, @NonNull CancellationSignal cancellationSignal) {
+    Stopwatch stopwatch = new Stopwatch("load(" + start + ", " + length + "), " + getClass().getSimpleName());
+
+    List<Conversation> conversations  = new ArrayList<>(length);
     List<Recipient>    recipients     = new LinkedList<>();
 
-    try (ThreadDatabase.Reader reader = threadDatabase.readerFor(getCursor(params.requestedStartPosition, params.requestedLoadSize))) {
+    try (ConversationReader reader = new ConversationReader(getCursor(start, length))) {
       ThreadRecord record;
-      while ((record = reader.getNext()) != null && effectiveCount < totalCount && !isInvalid()) {
-        conversations.add(new Conversation(record));
-        recipients.add(record.getRecipient());
-        effectiveCount++;
-      }
-    }
-
-    ApplicationDependencies.getRecipientCache().addToCache(recipients);
-
-    if (!isInvalid()) {
-      SizeFixResult<Conversation> result = SizeFixResult.ensureMultipleOfPageSize(conversations, params.requestedStartPosition, params.pageSize, totalCount);
-
-      callback.onResult(result.getItems(), params.requestedStartPosition, result.getTotal());
-    }
-
-    Log.d(TAG, "[Initial Load] " + (System.currentTimeMillis() - start) + " ms | start: " + params.requestedStartPosition + ", size: " + params.requestedLoadSize + ", totalCount: " + totalCount + ", class: " + getClass().getSimpleName() + (isInvalid() ? " -- invalidated" : ""));
-  }
-
-  @Override
-  public final void loadRange(@NonNull LoadRangeParams params, @NonNull LoadRangeCallback<Conversation> callback) {
-    long start = System.currentTimeMillis();
-
-    List<Conversation> conversations = new ArrayList<>(params.loadSize);
-    List<Recipient>    recipients    = new LinkedList<>();
-
-    try (ThreadDatabase.Reader reader = threadDatabase.readerFor(getCursor(params.startPosition, params.loadSize))) {
-      ThreadRecord record;
-      while ((record = reader.getNext()) != null && !isInvalid()) {
+      while ((record = reader.getNext()) != null && !cancellationSignal.isCanceled()) {
         conversations.add(new Conversation(record));
         recipients.add(record.getRecipient());
       }
     }
 
+    stopwatch.split("cursor");
+
     ApplicationDependencies.getRecipientCache().addToCache(recipients);
 
-    callback.onResult(conversations);
+    stopwatch.split("cache-recipients");
 
-    Log.d(TAG, "[Update] " + (System.currentTimeMillis() - start) + " ms | start: " + params.startPosition + ", size: " + params.loadSize + ", class: " + getClass().getSimpleName() + (isInvalid() ? " -- invalidated" : ""));
+    stopwatch.stop(TAG);
+
+    return conversations;
   }
 
   protected abstract int getTotalCount();
@@ -118,8 +78,8 @@ abstract class ConversationListDataSource extends PositionalDataSource<Conversat
 
   private static class ArchivedConversationListDataSource extends ConversationListDataSource {
 
-    ArchivedConversationListDataSource(@NonNull Context context, @NonNull Invalidator invalidator) {
-      super(context, invalidator);
+    ArchivedConversationListDataSource(@NonNull Context context) {
+      super(context);
     }
 
     @Override
@@ -133,38 +93,96 @@ abstract class ConversationListDataSource extends PositionalDataSource<Conversat
     }
   }
 
-  private static class UnarchivedConversationListDataSource extends ConversationListDataSource {
+  @VisibleForTesting
+  static class UnarchivedConversationListDataSource extends ConversationListDataSource {
 
-    UnarchivedConversationListDataSource(@NonNull Context context, @NonNull Invalidator invalidator) {
-      super(context, invalidator);
+    private int totalCount;
+    private int pinnedCount;
+    private int archivedCount;
+    private int unpinnedCount;
+
+    UnarchivedConversationListDataSource(@NonNull Context context) {
+      super(context);
     }
 
     @Override
     protected int getTotalCount() {
-      return threadDatabase.getUnarchivedConversationListCount();
+      int unarchivedCount = threadDatabase.getUnarchivedConversationListCount();
+
+      pinnedCount   = threadDatabase.getPinnedConversationListCount();
+      archivedCount = threadDatabase.getArchivedConversationListCount();
+      unpinnedCount = unarchivedCount - pinnedCount;
+      totalCount    = unarchivedCount;
+
+      if (archivedCount != 0) {
+        totalCount++;
+      }
+
+      if (pinnedCount != 0) {
+        if (unpinnedCount != 0) {
+          totalCount += 2;
+        } else {
+          totalCount += 1;
+        }
+      }
+
+      return totalCount;
     }
 
     @Override
     protected Cursor getCursor(long offset, long limit) {
-      return threadDatabase.getConversationList(offset, limit);
+      List<Cursor> cursors       = new ArrayList<>(5);
+      long         originalLimit = limit;
+
+      if (offset == 0 && hasPinnedHeader()) {
+        MatrixCursor pinnedHeaderCursor = new MatrixCursor(ConversationReader.HEADER_COLUMN);
+        pinnedHeaderCursor.addRow(ConversationReader.PINNED_HEADER);
+        cursors.add(pinnedHeaderCursor);
+        limit--;
+      }
+
+      Cursor pinnedCursor = threadDatabase.getUnarchivedConversationList(true, offset, limit);
+      cursors.add(pinnedCursor);
+      limit -= pinnedCursor.getCount();
+
+      if (offset == 0 && hasUnpinnedHeader()) {
+        MatrixCursor unpinnedHeaderCursor = new MatrixCursor(ConversationReader.HEADER_COLUMN);
+        unpinnedHeaderCursor.addRow(ConversationReader.UNPINNED_HEADER);
+        cursors.add(unpinnedHeaderCursor);
+        limit--;
+      }
+
+      long   unpinnedOffset = Math.max(0, offset - pinnedCount - getHeaderOffset());
+      Cursor unpinnedCursor = threadDatabase.getUnarchivedConversationList(false, unpinnedOffset, limit);
+      cursors.add(unpinnedCursor);
+
+      if (offset + originalLimit >= totalCount && hasArchivedFooter()) {
+        MatrixCursor archivedFooterCursor = new MatrixCursor(ConversationReader.ARCHIVED_COLUMNS);
+        archivedFooterCursor.addRow(ConversationReader.createArchivedFooterRow(archivedCount));
+        cursors.add(archivedFooterCursor);
+      }
+
+      return new MergeCursor(cursors.toArray(new Cursor[]{}));
     }
-  }
 
-  static class Factory extends DataSource.Factory<Integer, Conversation> {
-
-    private final Context     context;
-    private final Invalidator invalidator;
-    private final boolean     isArchived;
-
-    public Factory(@NonNull Context context, @NonNull Invalidator invalidator, boolean isArchived) {
-      this.context     = context;
-      this.invalidator = invalidator;
-      this.isArchived  = isArchived;
+    @VisibleForTesting
+    int getHeaderOffset() {
+      return (hasPinnedHeader() ? 1 : 0) + (hasUnpinnedHeader() ? 1 : 0);
     }
 
-    @Override
-    public @NonNull DataSource<Integer, Conversation> create() {
-      return ConversationListDataSource.create(context, invalidator, isArchived);
+    @VisibleForTesting
+    boolean hasPinnedHeader() {
+      return pinnedCount != 0;
+    }
+
+    @VisibleForTesting
+    boolean hasUnpinnedHeader() {
+      return hasPinnedHeader() && unpinnedCount != 0;
+    }
+
+    @VisibleForTesting
+    boolean hasArchivedFooter() {
+      return archivedCount != 0;
     }
   }
 }

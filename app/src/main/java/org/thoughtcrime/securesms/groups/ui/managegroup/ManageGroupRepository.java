@@ -8,31 +8,32 @@ import androidx.core.util.Consumer;
 
 import com.annimon.stream.Stream;
 
+import org.signal.core.util.concurrent.SignalExecutors;
+import org.signal.core.util.logging.Log;
 import org.signal.storageservice.protos.groups.local.DecryptedGroup;
 import org.thoughtcrime.securesms.ContactSelectionListFragment;
 import org.thoughtcrime.securesms.database.DatabaseFactory;
 import org.thoughtcrime.securesms.database.GroupDatabase;
+import org.thoughtcrime.securesms.database.RecipientDatabase;
 import org.thoughtcrime.securesms.database.ThreadDatabase;
 import org.thoughtcrime.securesms.groups.GroupAccessControl;
-import org.thoughtcrime.securesms.groups.GroupChangeBusyException;
-import org.thoughtcrime.securesms.groups.GroupChangeFailedException;
+import org.thoughtcrime.securesms.groups.GroupChangeException;
 import org.thoughtcrime.securesms.groups.GroupId;
-import org.thoughtcrime.securesms.groups.GroupInsufficientRightsException;
 import org.thoughtcrime.securesms.groups.GroupManager;
-import org.thoughtcrime.securesms.groups.GroupNotAMemberException;
 import org.thoughtcrime.securesms.groups.GroupProtoUtil;
 import org.thoughtcrime.securesms.groups.MembershipNotSuitableForV2Exception;
-import org.thoughtcrime.securesms.groups.ui.AddMembersResultCallback;
+import org.thoughtcrime.securesms.groups.SelectionLimits;
 import org.thoughtcrime.securesms.groups.ui.GroupChangeErrorCallback;
 import org.thoughtcrime.securesms.groups.ui.GroupChangeFailureReason;
-import org.thoughtcrime.securesms.logging.Log;
 import org.thoughtcrime.securesms.recipients.Recipient;
 import org.thoughtcrime.securesms.recipients.RecipientId;
+import org.thoughtcrime.securesms.recipients.RecipientUtil;
+import org.thoughtcrime.securesms.util.AsynchronousCallback;
 import org.thoughtcrime.securesms.util.FeatureFlags;
-import org.thoughtcrime.securesms.util.concurrent.SignalExecutors;
 import org.thoughtcrime.securesms.util.concurrent.SimpleTask;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
 
@@ -41,22 +42,16 @@ final class ManageGroupRepository {
   private static final String TAG = Log.tag(ManageGroupRepository.class);
 
   private final Context context;
-  private final GroupId groupId;
 
-  ManageGroupRepository(@NonNull Context context, @NonNull GroupId groupId) {
-    this.context  = context;
-    this.groupId  = groupId;
+  ManageGroupRepository(@NonNull Context context) {
+    this.context = context;
   }
 
-  public GroupId getGroupId() {
-    return groupId;
+  void getGroupState(@NonNull GroupId groupId, @NonNull Consumer<GroupStateResult> onGroupStateLoaded) {
+    SignalExecutors.BOUNDED.execute(() -> onGroupStateLoaded.accept(getGroupState(groupId)));
   }
 
-  void getGroupState(@NonNull Consumer<GroupStateResult> onGroupStateLoaded) {
-    SignalExecutors.BOUNDED.execute(() -> onGroupStateLoaded.accept(getGroupState()));
-  }
-
-  void getGroupCapacity(@NonNull Consumer<GroupCapacityResult> onGroupCapacityLoaded) {
+  void getGroupCapacity(@NonNull GroupId groupId, @NonNull Consumer<GroupCapacityResult> onGroupCapacityLoaded) {
     SimpleTask.run(SignalExecutors.BOUNDED, () -> {
       GroupDatabase.GroupRecord groupRecord = DatabaseFactory.getGroupDatabase(context).getGroup(groupId).get();
       if (groupRecord.isV2Group()) {
@@ -68,95 +63,99 @@ final class ManageGroupRepository {
 
         members.addAll(pendingMembers);
 
-        return new GroupCapacityResult(members, FeatureFlags.gv2GroupCapacity());
+        return new GroupCapacityResult(members, FeatureFlags.groupLimits());
       } else {
-        return new GroupCapacityResult(groupRecord.getMembers(), ContactSelectionListFragment.NO_LIMIT);
+        return new GroupCapacityResult(groupRecord.getMembers(), FeatureFlags.groupLimits());
       }
     }, onGroupCapacityLoaded::accept);
   }
 
   @WorkerThread
-  private GroupStateResult getGroupState() {
+  private GroupStateResult getGroupState(@NonNull GroupId groupId) {
     ThreadDatabase threadDatabase = DatabaseFactory.getThreadDatabase(context);
-    Recipient      groupRecipient = Recipient.externalGroup(context, groupId);
+    Recipient      groupRecipient = Recipient.externalGroupExact(context, groupId);
     long           threadId       = threadDatabase.getThreadIdFor(groupRecipient);
 
     return new GroupStateResult(threadId, groupRecipient);
   }
 
-  void setExpiration(int newExpirationTime, @NonNull GroupChangeErrorCallback error) {
+  void setExpiration(@NonNull GroupId groupId, int newExpirationTime, @NonNull GroupChangeErrorCallback error) {
     SignalExecutors.UNBOUNDED.execute(() -> {
       try {
         GroupManager.updateGroupTimer(context, groupId.requirePush(), newExpirationTime);
-      } catch (GroupInsufficientRightsException e) {
+      } catch (GroupChangeException | IOException e) {
         Log.w(TAG, e);
-        error.onError(GroupChangeFailureReason.NO_RIGHTS);
-      } catch (GroupNotAMemberException e) {
-        Log.w(TAG, e);
-        error.onError(GroupChangeFailureReason.NOT_A_MEMBER);
-      } catch (GroupChangeFailedException | GroupChangeBusyException | IOException e) {
-        Log.w(TAG, e);
-        error.onError(GroupChangeFailureReason.OTHER);
+        error.onError(GroupChangeFailureReason.fromException(e));
       }
     });
   }
 
-  void applyMembershipRightsChange(@NonNull GroupAccessControl newRights, @NonNull GroupChangeErrorCallback error) {
+  void applyMembershipRightsChange(@NonNull GroupId groupId, @NonNull GroupAccessControl newRights, @NonNull GroupChangeErrorCallback error) {
     SignalExecutors.UNBOUNDED.execute(() -> {
       try {
         GroupManager.applyMembershipAdditionRightsChange(context, groupId.requireV2(), newRights);
-      } catch (GroupInsufficientRightsException | GroupNotAMemberException e) {
+      } catch (GroupChangeException | IOException e) {
         Log.w(TAG, e);
-        error.onError(GroupChangeFailureReason.NO_RIGHTS);
-      } catch (GroupChangeFailedException | GroupChangeBusyException | IOException e) {
-        Log.w(TAG, e);
-        error.onError(GroupChangeFailureReason.OTHER);
+        error.onError(GroupChangeFailureReason.fromException(e));
       }
     });
   }
 
-  void applyAttributesRightsChange(@NonNull GroupAccessControl newRights, @NonNull GroupChangeErrorCallback error) {
+  void applyAttributesRightsChange(@NonNull GroupId groupId, @NonNull GroupAccessControl newRights, @NonNull GroupChangeErrorCallback error) {
     SignalExecutors.UNBOUNDED.execute(() -> {
       try {
         GroupManager.applyAttributesRightsChange(context, groupId.requireV2(), newRights);
-      } catch (GroupInsufficientRightsException | GroupNotAMemberException e) {
+      } catch (GroupChangeException | IOException e) {
         Log.w(TAG, e);
-        error.onError(GroupChangeFailureReason.NO_RIGHTS);
-      } catch (GroupChangeFailedException | GroupChangeBusyException | IOException e) {
-        Log.w(TAG, e);
-        error.onError(GroupChangeFailureReason.OTHER);
+        error.onError(GroupChangeFailureReason.fromException(e));
       }
     });
   }
 
-  public void getRecipient(@NonNull Consumer<Recipient> recipientCallback) {
+  public void getRecipient(@NonNull GroupId groupId, @NonNull Consumer<Recipient> recipientCallback) {
     SimpleTask.run(SignalExecutors.BOUNDED,
-                   () -> Recipient.externalGroup(context, groupId),
+                   () -> Recipient.externalGroupExact(context, groupId),
                    recipientCallback::accept);
   }
 
-  void setMuteUntil(long until) {
+  void setMuteUntil(@NonNull GroupId groupId, long until) {
     SignalExecutors.BOUNDED.execute(() -> {
-      RecipientId recipientId = Recipient.externalGroup(context, groupId).getId();
+      RecipientId recipientId = Recipient.externalGroupExact(context, groupId).getId();
       DatabaseFactory.getRecipientDatabase(context).setMuted(recipientId, until);
     });
   }
 
-  void addMembers(@NonNull List<RecipientId> selected, @NonNull AddMembersResultCallback addMembersResultCallback, @NonNull GroupChangeErrorCallback error) {
+  void addMembers(@NonNull GroupId groupId,
+                  @NonNull List<RecipientId> selected,
+                  @NonNull AsynchronousCallback.WorkerThread<ManageGroupViewModel.AddMembersResult, GroupChangeFailureReason> callback)
+  {
     SignalExecutors.UNBOUNDED.execute(() -> {
       try {
-        GroupManager.addMembers(context, groupId.requirePush(), selected);
-        addMembersResultCallback.onMembersAdded(selected.size());
-      } catch (GroupInsufficientRightsException | GroupNotAMemberException e) {
+        GroupManager.GroupActionResult groupActionResult = GroupManager.addMembers(context, groupId.requirePush(), selected);
+        callback.onComplete(new ManageGroupViewModel.AddMembersResult(groupActionResult.getAddedMemberCount(), Recipient.resolvedList(groupActionResult.getInvitedMembers())));
+      } catch (GroupChangeException | MembershipNotSuitableForV2Exception | IOException e) {
         Log.w(TAG, e);
-        error.onError(GroupChangeFailureReason.NO_RIGHTS);
-      } catch (GroupChangeFailedException | GroupChangeBusyException | IOException e) {
-        Log.w(TAG, e);
-        error.onError(GroupChangeFailureReason.OTHER);
-      } catch (MembershipNotSuitableForV2Exception e) {
-        Log.w(TAG, e);
-        error.onError(GroupChangeFailureReason.NOT_CAPABLE);
+        callback.onError(GroupChangeFailureReason.fromException(e));
       }
+    });
+  }
+
+  void blockAndLeaveGroup(@NonNull GroupId groupId, @NonNull GroupChangeErrorCallback error, @NonNull Runnable onSuccess) {
+    SignalExecutors.UNBOUNDED.execute(() -> {
+      try {
+        RecipientUtil.block(context, Recipient.externalGroupExact(context, groupId));
+        onSuccess.run();
+      } catch (GroupChangeException | IOException e) {
+        Log.w(TAG, e);
+        error.onError(GroupChangeFailureReason.fromException(e));
+      }
+    });
+  }
+
+  void setMentionSetting(@NonNull GroupId groupId, RecipientDatabase.MentionSetting mentionSetting) {
+    SignalExecutors.BOUNDED.execute(() -> {
+      RecipientId recipientId = Recipient.externalGroupExact(context, groupId).getId();
+      DatabaseFactory.getRecipientDatabase(context).setMentionSetting(recipientId, mentionSetting);
     });
   }
 
@@ -183,19 +182,52 @@ final class ManageGroupRepository {
 
   static final class GroupCapacityResult {
     private final List<RecipientId> members;
-    private final int               totalCapacity;
+    private final SelectionLimits selectionLimits;
 
-    GroupCapacityResult(@NonNull List<RecipientId> members, int totalCapacity) {
-      this.members        = members;
-      this.totalCapacity  = totalCapacity;
+    GroupCapacityResult(@NonNull List<RecipientId> members, @NonNull SelectionLimits selectionLimits) {
+      this.members         = members;
+      this.selectionLimits = selectionLimits;
     }
 
     public @NonNull List<RecipientId> getMembers() {
       return members;
     }
 
-    public int getTotalCapacity() {
-      return totalCapacity;
+    public int getSelectionLimit() {
+      if (!selectionLimits.hasHardLimit()) {
+        return ContactSelectionListFragment.NO_LIMIT;
+      }
+
+      boolean containsSelf = members.indexOf(Recipient.self().getId()) != -1;
+
+      return selectionLimits.getHardLimit() - (containsSelf ? 1 : 0);
+    }
+
+    public int getSelectionWarning() {
+      if (!selectionLimits.hasRecommendedLimit()) {
+        return ContactSelectionListFragment.NO_LIMIT;
+      }
+
+      boolean containsSelf = members.indexOf(Recipient.self().getId()) != -1;
+
+      return selectionLimits.getRecommendedLimit() - (containsSelf ? 1 : 0);
+    }
+
+    public int getRemainingCapacity() {
+      return selectionLimits.getHardLimit() - members.size();
+    }
+
+    public @NonNull ArrayList<RecipientId> getMembersWithoutSelf() {
+      ArrayList<RecipientId> recipientIds = new ArrayList<>(members.size());
+      RecipientId            selfId       = Recipient.self().getId();
+
+      for (RecipientId recipientId : members) {
+        if (!recipientId.equals(selfId)) {
+          recipientIds.add(recipientId);
+        }
+      }
+
+      return recipientIds;
     }
   }
 

@@ -10,36 +10,35 @@ import androidx.lifecycle.MutableLiveData;
 
 import com.annimon.stream.Stream;
 
+import org.signal.core.util.concurrent.SignalExecutors;
+import org.signal.core.util.logging.Log;
 import org.thoughtcrime.securesms.crypto.storage.TextSecureIdentityKeyStore;
 import org.thoughtcrime.securesms.database.DatabaseFactory;
 import org.thoughtcrime.securesms.database.IdentityDatabase;
 import org.thoughtcrime.securesms.database.IdentityDatabase.IdentityRecord;
-import org.thoughtcrime.securesms.database.MmsDatabase;
-import org.thoughtcrime.securesms.database.SmsDatabase;
+import org.thoughtcrime.securesms.database.MessageDatabase;
+import org.thoughtcrime.securesms.database.MmsSmsDatabase;
+import org.thoughtcrime.securesms.database.NoSuchMessageException;
 import org.thoughtcrime.securesms.database.model.MessageRecord;
 import org.thoughtcrime.securesms.recipients.Recipient;
 import org.thoughtcrime.securesms.recipients.RecipientId;
 import org.thoughtcrime.securesms.sms.MessageSender;
-import org.thoughtcrime.securesms.util.concurrent.SignalExecutors;
 import org.whispersystems.libsignal.IdentityKey;
 import org.whispersystems.libsignal.SignalProtocolAddress;
 
+import java.util.Collection;
 import java.util.List;
 
 import static org.whispersystems.libsignal.SessionCipher.SESSION_LOCK;
 
 final class SafetyNumberChangeRepository {
 
+  private static final String TAG = SafetyNumberChangeRepository.class.getSimpleName();
+
   private final Context context;
 
   SafetyNumberChangeRepository(Context context) {
     this.context = context.getApplicationContext();
-  }
-
-  @NonNull LiveData<SafetyNumberChangeState> getSafetyNumberChangeState(@NonNull List<RecipientId> recipientIds, @Nullable Long messageId) {
-    MutableLiveData<SafetyNumberChangeState> liveData = new MutableLiveData<>();
-    SignalExecutors.BOUNDED.execute(() -> liveData.postValue(getSafetyNumberChangeStateInternal(recipientIds, messageId)));
-    return liveData;
   }
 
   @NonNull LiveData<TrustAndVerifyResult> trustOrVerifyChangedRecipients(@NonNull List<ChangedRecipient> changedRecipients) {
@@ -55,10 +54,10 @@ final class SafetyNumberChangeRepository {
   }
 
   @WorkerThread
-  private @NonNull SafetyNumberChangeState getSafetyNumberChangeStateInternal(@NonNull List<RecipientId> recipientIds, @Nullable Long messageId) {
+  public @NonNull SafetyNumberChangeState getSafetyNumberChangeState(@NonNull Collection<RecipientId> recipientIds, @Nullable Long messageId, @Nullable String messageType) {
     MessageRecord messageRecord = null;
-    if (messageId != null) {
-      messageRecord = DatabaseFactory.getMmsSmsDatabase(context).getMessageRecord(messageId);
+    if (messageId != null && messageType != null) {
+      messageRecord = getMessageRecord(messageId, messageType);
     }
 
     List<Recipient> recipients = Stream.of(recipientIds).map(Recipient::resolved).toList();
@@ -68,6 +67,23 @@ final class SafetyNumberChangeRepository {
                                                      .toList();
 
     return new SafetyNumberChangeState(changedRecipients, messageRecord);
+  }
+
+  @WorkerThread
+  private @Nullable MessageRecord getMessageRecord(Long messageId, String messageType) {
+    try {
+      switch (messageType) {
+        case MmsSmsDatabase.SMS_TRANSPORT:
+          return DatabaseFactory.getSmsDatabase(context).getMessageRecord(messageId);
+        case MmsSmsDatabase.MMS_TRANSPORT:
+          return DatabaseFactory.getMmsDatabase(context).getMessageRecord(messageId);
+        default:
+          throw new AssertionError("no valid message type specified");
+      }
+    } catch (NoSuchMessageException e) {
+      Log.i(TAG, e);
+    }
+    return null;
   }
 
   @WorkerThread
@@ -88,7 +104,7 @@ final class SafetyNumberChangeRepository {
       }
     }
 
-    return TrustAndVerifyResult.TRUST_AND_VERIFY;
+    return TrustAndVerifyResult.trustAndVerify(changedRecipients);
   }
 
   @WorkerThread
@@ -106,13 +122,13 @@ final class SafetyNumberChangeRepository {
       processOutgoingMessageRecord(changedRecipients, messageRecord);
     }
 
-    return TrustAndVerifyResult.TRUST_VERIFY_AND_RESEND;
+    return TrustAndVerifyResult.trustVerifyAndResend(changedRecipients, messageRecord);
   }
 
   @WorkerThread
   private void processOutgoingMessageRecord(@NonNull List<ChangedRecipient> changedRecipients, @NonNull MessageRecord messageRecord) {
-    SmsDatabase smsDatabase = DatabaseFactory.getSmsDatabase(context);
-    MmsDatabase mmsDatabase = DatabaseFactory.getMmsDatabase(context);
+    MessageDatabase smsDatabase = DatabaseFactory.getSmsDatabase(context);
+    MessageDatabase mmsDatabase = DatabaseFactory.getMmsDatabase(context);
 
     for (ChangedRecipient changedRecipient : changedRecipients) {
       RecipientId id          = changedRecipient.getRecipient().getId();

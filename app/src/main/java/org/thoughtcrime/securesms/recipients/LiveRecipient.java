@@ -1,7 +1,6 @@
 package org.thoughtcrime.securesms.recipients;
 
 import android.content.Context;
-import android.text.TextUtils;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.WorkerThread;
@@ -12,14 +11,12 @@ import androidx.lifecycle.Observer;
 
 import com.annimon.stream.Stream;
 
-import org.thoughtcrime.securesms.R;
+import org.signal.core.util.logging.Log;
 import org.thoughtcrime.securesms.database.DatabaseFactory;
 import org.thoughtcrime.securesms.database.GroupDatabase;
 import org.thoughtcrime.securesms.database.GroupDatabase.GroupRecord;
 import org.thoughtcrime.securesms.database.RecipientDatabase;
 import org.thoughtcrime.securesms.database.RecipientDatabase.RecipientSettings;
-import org.thoughtcrime.securesms.logging.Log;
-import org.thoughtcrime.securesms.util.TextSecurePreferences;
 import org.thoughtcrime.securesms.util.Util;
 import org.whispersystems.libsignal.util.guava.Optional;
 
@@ -90,11 +87,10 @@ public final class LiveRecipient {
    */
   public void observeForever(@NonNull RecipientForeverObserver observer) {
     Util.postToMain(() -> {
-      observers.add(observer);
-
-      if (observers.size() == 1) {
+      if (observers.isEmpty()) {
         liveData.observeForever(foreverObserver);
       }
+      observers.add(observer);
     });
   }
 
@@ -142,18 +138,27 @@ public final class LiveRecipient {
     return updated;
   }
 
+  @WorkerThread
+  public void refresh() {
+    refresh(getId());
+  }
+
   /**
    * Forces a reload of the underlying recipient.
    */
   @WorkerThread
-  public void refresh() {
+  public void refresh(@NonNull RecipientId id) {
+    if (!getId().equals(id)) {
+      Log.w(TAG, "Switching ID from " + getId() + " to " + id);
+    }
+
     if (getId().isUnknown()) return;
 
     if (Util.isMainThread()) {
-      Log.w(TAG, "[Refresh][MAIN] " + getId(), new Throwable());
+      Log.w(TAG, "[Refresh][MAIN] " + id, new Throwable());
     }
 
-    Recipient       recipient    = fetchAndCacheRecipientFromDisk(getId());
+    Recipient       recipient    = fetchAndCacheRecipientFromDisk(id);
     List<Recipient> participants = Stream.of(recipient.getParticipants())
                                          .map(Recipient::getId)
                                          .map(this::fetchAndCacheRecipientFromDisk)

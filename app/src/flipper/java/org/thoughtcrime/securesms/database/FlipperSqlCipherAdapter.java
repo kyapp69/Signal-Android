@@ -1,5 +1,6 @@
 package org.thoughtcrime.securesms.database;
 
+import android.app.Application;
 import android.content.Context;
 import android.database.Cursor;
 import android.text.TextUtils;
@@ -14,14 +15,17 @@ import net.sqlcipher.DatabaseUtils;
 import net.sqlcipher.database.SQLiteDatabase;
 import net.sqlcipher.database.SQLiteStatement;
 
+import org.signal.core.util.logging.Log;
 import org.thoughtcrime.securesms.database.helpers.SQLCipherOpenHelper;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * A lot of this code is taken from {@link com.facebook.flipper.plugins.databases.impl.SqliteDatabaseDriver}
@@ -29,13 +33,31 @@ import java.util.Map;
  */
 public class FlipperSqlCipherAdapter extends DatabaseDriver<FlipperSqlCipherAdapter.Descriptor> {
 
+  private static final String TAG = Log.tag(FlipperSqlCipherAdapter.class);
+
   public FlipperSqlCipherAdapter(Context context) {
     super(context);
   }
 
   @Override
   public List<Descriptor> getDatabases() {
-    return Collections.singletonList(new Descriptor(DatabaseFactory.getRawDatabase(getContext())));
+    try {
+      Field databaseHelperField = DatabaseFactory.class.getDeclaredField("databaseHelper");
+      databaseHelperField.setAccessible(true);
+
+      SignalDatabase mainOpenHelper       = Objects.requireNonNull((SQLCipherOpenHelper) databaseHelperField.get(DatabaseFactory.getInstance(getContext())));
+      SignalDatabase keyValueOpenHelper   = KeyValueDatabase.getInstance((Application) getContext());
+      SignalDatabase megaphoneOpenHelper  = MegaphoneDatabase.getInstance((Application) getContext());
+      SignalDatabase jobManagerOpenHelper = JobDatabase.getInstance((Application) getContext());
+
+      return Arrays.asList(new Descriptor(mainOpenHelper),
+                           new Descriptor(keyValueOpenHelper),
+                           new Descriptor(megaphoneOpenHelper),
+                           new Descriptor(jobManagerOpenHelper));
+    } catch (Exception e) {
+      Log.i(TAG, "Unable to use reflection to access raw database.", e);
+    }
+    return Collections.emptyList();
   }
 
   @Override
@@ -223,9 +245,9 @@ public class FlipperSqlCipherAdapter extends DatabaseDriver<FlipperSqlCipherAdap
   }
 
   static class Descriptor implements DatabaseDescriptor {
-    private final SQLCipherOpenHelper sqlCipherOpenHelper;
+    private final SignalDatabase sqlCipherOpenHelper;
 
-    Descriptor(@NonNull SQLCipherOpenHelper sqlCipherOpenHelper) {
+    Descriptor(@NonNull SignalDatabase sqlCipherOpenHelper) {
       this.sqlCipherOpenHelper = sqlCipherOpenHelper;
     }
 
@@ -235,11 +257,11 @@ public class FlipperSqlCipherAdapter extends DatabaseDriver<FlipperSqlCipherAdap
     }
 
     public @NonNull SQLiteDatabase getReadable() {
-      return sqlCipherOpenHelper.getReadableDatabase();
+      return sqlCipherOpenHelper.getSqlCipherDatabase();
     }
 
     public @NonNull SQLiteDatabase getWritable() {
-      return sqlCipherOpenHelper.getWritableDatabase();
+      return sqlCipherOpenHelper.getSqlCipherDatabase();
     }
   }
 }

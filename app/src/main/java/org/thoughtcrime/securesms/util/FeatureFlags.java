@@ -1,26 +1,28 @@
 package org.thoughtcrime.securesms.util;
 
+import android.os.Build;
 import android.text.TextUtils;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.VisibleForTesting;
 
 import com.annimon.stream.Stream;
-import com.google.android.collect.Sets;
 
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.signal.core.util.logging.Log;
+import org.thoughtcrime.securesms.BuildConfig;
 import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
+import org.thoughtcrime.securesms.groups.SelectionLimits;
 import org.thoughtcrime.securesms.jobs.RefreshAttributesJob;
-import org.thoughtcrime.securesms.jobs.RefreshOwnProfileJob;
 import org.thoughtcrime.securesms.jobs.RemoteConfigRefreshJob;
 import org.thoughtcrime.securesms.keyvalue.SignalStore;
-import org.thoughtcrime.securesms.logging.Log;
 
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
@@ -48,32 +50,49 @@ public final class FeatureFlags {
 
   private static final long FETCH_INTERVAL = TimeUnit.HOURS.toMillis(2);
 
-  private static final String UUIDS                      = "android.uuids";
-  private static final String USERNAMES                  = "android.usernames";
-  private static final String ATTACHMENTS_V3             = "android.attachmentsV3";
-  private static final String REMOTE_DELETE              = "android.remoteDelete";
-  private static final String PROFILE_FOR_CALLING        = "android.profileForCalling.2";
-  private static final String CALLING_PIP                = "android.callingPip";
-  private static final String GROUPS_V2                  = "android.groupsv2";
-  private static final String GROUPS_V2_CREATE           = "android.groupsv2.create";
-  private static final String GROUPS_V2_CAPACITY         = "android.groupsv2.capacity";
-  private static final String CDS                        = "android.cds";
-  private static final String INTERNAL_USER              = "android.internalUser";
+  private static final String USERNAMES                    = "android.usernames";
+  private static final String GROUPS_V2_RECOMMENDED_LIMIT  = "global.groupsv2.maxGroupSize";
+  private static final String GROUPS_V2_HARD_LIMIT         = "global.groupsv2.groupSizeHardLimit";
+  private static final String INTERNAL_USER                = "android.internalUser";
+  private static final String VERIFY_V2                    = "android.verifyV2";
+  private static final String PHONE_NUMBER_PRIVACY_VERSION = "android.phoneNumberPrivacyVersion";
+  private static final String CLIENT_EXPIRATION            = "android.clientExpiration";
+  public  static final String RESEARCH_MEGAPHONE_1         = "research.megaphone.1";
+  public  static final String DONATE_MEGAPHONE             = "android.donate";
+  private static final String VIEWED_RECEIPTS              = "android.viewed.receipts";
+  private static final String GROUP_CALLING                = "android.groupsv2.calling.2";
+  private static final String GV1_MANUAL_MIGRATE           = "android.groupsV1Migration.manual";
+  private static final String GV1_FORCED_MIGRATE           = "android.groupsV1Migration.forced";
+  private static final String GV1_MIGRATION_JOB            = "android.groupsV1Migration.job";
+  private static final String SEND_VIEWED_RECEIPTS         = "android.sendViewedReceipts";
+  private static final String CUSTOM_VIDEO_MUXER           = "android.customVideoMuxer";
 
   /**
    * We will only store remote values for flags in this set. If you want a flag to be controllable
    * remotely, place it in here.
    */
+  @VisibleForTesting
+  static final Set<String> REMOTE_CAPABLE = SetUtil.newHashSet(
+      GROUPS_V2_RECOMMENDED_LIMIT,
+      GROUPS_V2_HARD_LIMIT,
+      INTERNAL_USER,
+      USERNAMES,
+      VERIFY_V2,
+      CLIENT_EXPIRATION,
+      RESEARCH_MEGAPHONE_1,
+      DONATE_MEGAPHONE,
+      VIEWED_RECEIPTS,
+      GV1_MIGRATION_JOB,
+      GV1_MANUAL_MIGRATE,
+      GV1_FORCED_MIGRATE,
+      GROUP_CALLING,
+      SEND_VIEWED_RECEIPTS,
+      CUSTOM_VIDEO_MUXER
+  );
 
-  private static final Set<String> REMOTE_CAPABLE = Sets.newHashSet(
-      ATTACHMENTS_V3,
-      REMOTE_DELETE,
-      PROFILE_FOR_CALLING,
-      CALLING_PIP,
-      GROUPS_V2,
-      GROUPS_V2_CREATE,
-      GROUPS_V2_CAPACITY,
-      INTERNAL_USER
+  @VisibleForTesting
+  static final Set<String> NOT_REMOTE_CAPABLE = SetUtil.newHashSet(
+      PHONE_NUMBER_PRIVACY_VERSION
   );
 
   /**
@@ -83,7 +102,8 @@ public final class FeatureFlags {
    * an addition to this map.
    */
   @SuppressWarnings("MismatchedQueryAndUpdateOfCollection")
-  private static final Map<String, Object> FORCED_VALUES = new HashMap<String, Object>() {{
+  @VisibleForTesting
+  static final Map<String, Object> FORCED_VALUES = new HashMap<String, Object>() {{
   }};
 
   /**
@@ -93,15 +113,21 @@ public final class FeatureFlags {
    * will be updated arbitrarily at runtime. This will make values more responsive, but also places
    * more burden on the reader to ensure that the app experience remains consistent.
    */
-  private static final Set<String> HOT_SWAPPABLE = Sets.newHashSet(
-      ATTACHMENTS_V3
+  @VisibleForTesting
+  static final Set<String> HOT_SWAPPABLE = SetUtil.newHashSet(
+      VERIFY_V2,
+      CLIENT_EXPIRATION,
+      GROUP_CALLING,
+      GV1_MIGRATION_JOB,
+      CUSTOM_VIDEO_MUXER
   );
 
   /**
    * Flags in this set will stay true forever once they receive a true value from a remote config.
    */
-  private static final Set<String> STICKY = Sets.newHashSet(
-      GROUPS_V2
+  @VisibleForTesting
+  static final Set<String> STICKY = SetUtil.newHashSet(
+      VERIFY_V2
   );
 
   /**
@@ -116,13 +142,6 @@ public final class FeatureFlags {
    * desired test state.
    */
   private static final Map<String, OnFlagChange> FLAG_CHANGE_LISTENERS = new HashMap<String, OnFlagChange>() {{
-    put(GROUPS_V2, (change) -> {
-      if (change == Change.ENABLED) {
-        ApplicationDependencies.getJobManager().startChain(new RefreshAttributesJob())
-                               .then(new RefreshOwnProfileJob())
-                               .enqueue();
-      }
-    });
   }};
 
   private static final Map<String, Object> REMOTE_VALUES = new TreeMap<>();
@@ -144,7 +163,7 @@ public final class FeatureFlags {
   public static synchronized void refreshIfNecessary() {
     long timeSinceLastFetch = System.currentTimeMillis() - SignalStore.remoteConfigValues().getLastFetchTime();
 
-    if (timeSinceLastFetch > FETCH_INTERVAL) {
+    if (timeSinceLastFetch < 0 || timeSinceLastFetch > FETCH_INTERVAL) {
       Log.i(TAG, "Scheduling remote config refresh.");
       ApplicationDependencies.getJobManager().add(new RemoteConfigRefreshJob());
     } else {
@@ -170,53 +189,17 @@ public final class FeatureFlags {
     Log.i(TAG, "[Disk]   After : " + result.getDisk().toString());
   }
 
-  /** Whether or not we allow UUID-only contacts. */
-  public static synchronized boolean uuidOnlyContacts() {
-    return getBoolean(UUIDS, false);
-  }
-
-  /** Creating usernames, sending messages by username. Requires {@link #uuidOnlyContacts()}. */
+  /** Creating usernames, sending messages by username. */
   public static synchronized boolean usernames() {
-    boolean value = getBoolean(USERNAMES, false);
-    if (value && !uuidOnlyContacts()) throw new MissingFlagRequirementError();
-    return value;
-  }
-
-  /** Whether or not we use the attachments v3 form. */
-  public static boolean attachmentsV3() {
-    return getBoolean(ATTACHMENTS_V3, false);
-  }
-
-  /** Send support for remotely deleting a message. */
-  public static boolean remoteDelete() {
-    return getBoolean(REMOTE_DELETE, false);
-  }
-
-  /** Whether or not profile sharing is required for calling */
-  public static boolean profileForCalling() {
-    return getBoolean(PROFILE_FOR_CALLING, false);
-  }
-
-  /** Whether or not to display Calling PIP */
-  public static boolean callingPip() {
-    return getBoolean(CALLING_PIP, false);
-  }
-
-  /** Groups v2 send and receive. */
-  public static boolean groupsV2() {
-    return getBoolean(GROUPS_V2, false);
-  }
-
-  /** Groups v2 send and receive. */
-  public static boolean groupsV2create() {
-    return groupsV2() && getBoolean(GROUPS_V2_CREATE, false);
+    return getBoolean(USERNAMES, false);
   }
 
   /**
    * Maximum number of members allowed in a group.
    */
-  public static int gv2GroupCapacity() {
-    return getInteger(GROUPS_V2_CAPACITY, 100);
+  public static SelectionLimits groupLimits() {
+    return new SelectionLimits(getInteger(GROUPS_V2_RECOMMENDED_LIMIT, 151),
+                               getInteger(GROUPS_V2_HARD_LIMIT, 1001));
   }
 
   /** Internal testing extensions. */
@@ -224,9 +207,67 @@ public final class FeatureFlags {
     return getBoolean(INTERNAL_USER, false);
   }
 
-  /** Whether or not to use the new contact discovery service endpoint, which supports UUIDs. */
-  public static boolean cds() {
-    return getBoolean(CDS, false);
+  /** Whether or not to use the UUID in verification codes. */
+  public static boolean verifyV2() {
+    return getBoolean(VERIFY_V2, false);
+  }
+
+  /** The raw client expiration JSON string. */
+  public static String clientExpiration() {
+    return getString(CLIENT_EXPIRATION, null);
+  }
+
+  /** The raw research megaphone CSV string */
+  public static String researchMegaphone() {
+    return getString(RESEARCH_MEGAPHONE_1, "");
+  }
+
+  /** The raw donate megaphone CSV string */
+  public static String donateMegaphone() {
+    return getString(DONATE_MEGAPHONE, "");
+  }
+
+  /**
+   * Whether the user can choose phone number privacy settings, and;
+   * Whether to fetch and store the secondary certificate
+   */
+  public static boolean phoneNumberPrivacy() {
+    return getVersionFlag(PHONE_NUMBER_PRIVACY_VERSION) == VersionFlag.ON;
+  }
+
+  /** Whether the user should display the content revealed dot in voice notes. */
+  public static boolean viewedReceipts() {
+    return getBoolean(VIEWED_RECEIPTS, false);
+  }
+
+  /** Whether or not group calling is enabled. */
+  public static boolean groupCalling() {
+    return Build.VERSION.SDK_INT > 19 && getBoolean(GROUP_CALLING, false);
+  }
+
+  /** Whether or not we should run the job to proactively migrate groups. */
+  public static boolean groupsV1MigrationJob() {
+    return getBoolean(GV1_MIGRATION_JOB, false);
+  }
+
+  /** Whether or not manual migration from GV1->GV2 is enabled. */
+  public static boolean groupsV1ManualMigration() {
+    return getBoolean(GV1_MANUAL_MIGRATE, false);
+  }
+
+  /** Whether or not forced migration from GV1->GV2 is enabled. */
+  public static boolean groupsV1ForcedMigration() {
+    return getBoolean(GV1_FORCED_MIGRATE, false) && groupsV1ManualMigration();
+  }
+
+  /** Whether or not to send viewed receipts. */
+  public static boolean sendViewedReceipts() {
+    return getBoolean(SEND_VIEWED_RECEIPTS, false);
+  }
+
+  /** Whether to use the custom streaming muxer or built in android muxer. */
+  public static boolean useStreamingVideoMuxer() {
+    return getBoolean(CUSTOM_VIDEO_MUXER, false);
   }
 
   /** Only for rendering debug info. */
@@ -337,12 +378,37 @@ public final class FeatureFlags {
         changes.put(key, Change.REMOVED);
       } else if (newValue != oldValue && newValue instanceof Boolean) {
         changes.put(key, (boolean) newValue ? Change.ENABLED : Change.DISABLED);
-      } else if (newValue != oldValue) {
+      } else if (!Objects.equals(oldValue, newValue)) {
         changes.put(key, Change.CHANGED);
       }
     }
 
     return changes;
+  }
+
+  private static @NonNull VersionFlag getVersionFlag(@NonNull String key) {
+    int versionFromKey = getInteger(key, 0);
+
+    if (versionFromKey == 0) {
+      return VersionFlag.OFF;
+    }
+
+    if (BuildConfig.CANONICAL_VERSION_CODE >= versionFromKey) {
+      return VersionFlag.ON;
+    } else {
+      return VersionFlag.ON_IN_FUTURE_VERSION;
+    }
+  }
+
+  private enum VersionFlag {
+    /** The flag is no set */
+    OFF,
+
+    /** The flag is set on for a version higher than the current client version */
+    ON_IN_FUTURE_VERSION,
+
+    /** The flag is set on for this version or earlier */
+    ON
   }
 
   private static boolean getBoolean(@NonNull String key, boolean defaultValue) {
@@ -367,13 +433,27 @@ public final class FeatureFlags {
       return forced;
     }
 
-    String remote = (String) REMOTE_VALUES.get(key);
-    if (remote != null) {
+    Object remote = REMOTE_VALUES.get(key);
+    if (remote instanceof String) {
       try {
-        return Integer.parseInt(remote);
+        return Integer.parseInt((String) remote);
       } catch (NumberFormatException e) {
         Log.w(TAG, "Expected an int for key '" + key + "', but got something else! Falling back to the default.");
       }
+    }
+
+    return defaultValue;
+  }
+
+  private static String getString(@NonNull String key, String defaultValue) {
+    String forced = (String) FORCED_VALUES.get(key);
+    if (forced != null) {
+      return forced;
+    }
+
+    Object remote = REMOTE_VALUES.get(key);
+    if (remote instanceof String) {
+      return (String) remote;
     }
 
     return defaultValue;
@@ -427,14 +507,11 @@ public final class FeatureFlags {
     }
   }
 
-  private static final class MissingFlagRequirementError extends Error {
-  }
-
   @VisibleForTesting
   static final class UpdateResult {
     private final Map<String, Object> memory;
     private final Map<String, Object> disk;
-    private final Map<String, Change>  memoryChanges;
+    private final Map<String, Change> memoryChanges;
 
     UpdateResult(@NonNull Map<String, Object> memory, @NonNull Map<String, Object> disk, @NonNull Map<String, Change> memoryChanges) {
       this.memory        = memory;

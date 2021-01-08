@@ -54,7 +54,9 @@ import androidx.appcompat.view.ActionMode;
 import androidx.appcompat.widget.Toolbar;
 import androidx.appcompat.widget.TooltipCompat;
 import androidx.core.content.res.ResourcesCompat;
+import androidx.fragment.app.DialogFragment;
 import androidx.lifecycle.DefaultLifecycleObserver;
+import androidx.lifecycle.LifecycleObserver;
 import androidx.lifecycle.LifecycleOwner;
 import androidx.lifecycle.ProcessLifecycleOwner;
 import androidx.lifecycle.ViewModelProviders;
@@ -68,7 +70,8 @@ import com.google.android.material.snackbar.Snackbar;
 import org.greenrobot.eventbus.EventBus;
 import org.greenrobot.eventbus.Subscribe;
 import org.greenrobot.eventbus.ThreadMode;
-import org.thoughtcrime.securesms.ApplicationContext;
+import org.signal.core.util.concurrent.SignalExecutors;
+import org.signal.core.util.logging.Log;
 import org.thoughtcrime.securesms.MainFragment;
 import org.thoughtcrime.securesms.MainNavigator;
 import org.thoughtcrime.securesms.NewConversationActivity;
@@ -93,7 +96,7 @@ import org.thoughtcrime.securesms.conversationlist.model.Conversation;
 import org.thoughtcrime.securesms.conversationlist.model.MessageResult;
 import org.thoughtcrime.securesms.conversationlist.model.SearchResult;
 import org.thoughtcrime.securesms.database.DatabaseFactory;
-import org.thoughtcrime.securesms.database.MessagingDatabase.MarkedMessageInfo;
+import org.thoughtcrime.securesms.database.MessageDatabase.MarkedMessageInfo;
 import org.thoughtcrime.securesms.database.ThreadDatabase;
 import org.thoughtcrime.securesms.database.model.ThreadRecord;
 import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
@@ -101,7 +104,6 @@ import org.thoughtcrime.securesms.events.ReminderUpdateEvent;
 import org.thoughtcrime.securesms.insights.InsightsLauncher;
 import org.thoughtcrime.securesms.jobs.ServiceOutageDetectionJob;
 import org.thoughtcrime.securesms.lock.v2.CreateKbsPinActivity;
-import org.thoughtcrime.securesms.logging.Log;
 import org.thoughtcrime.securesms.mediasend.MediaSendActivity;
 import org.thoughtcrime.securesms.megaphone.Megaphone;
 import org.thoughtcrime.securesms.megaphone.MegaphoneActionController;
@@ -114,20 +116,25 @@ import org.thoughtcrime.securesms.recipients.Recipient;
 import org.thoughtcrime.securesms.service.KeyCachingService;
 import org.thoughtcrime.securesms.sms.MessageSender;
 import org.thoughtcrime.securesms.storage.StorageSyncHelper;
+import org.thoughtcrime.securesms.util.AppStartup;
 import org.thoughtcrime.securesms.util.AvatarUtil;
+import org.thoughtcrime.securesms.util.PlayStoreUtil;
 import org.thoughtcrime.securesms.util.ServiceUtil;
 import org.thoughtcrime.securesms.util.SnapToTopDataObserver;
 import org.thoughtcrime.securesms.util.StickyHeaderDecoration;
+import org.thoughtcrime.securesms.util.Stopwatch;
 import org.thoughtcrime.securesms.util.TextSecurePreferences;
 import org.thoughtcrime.securesms.util.Util;
 import org.thoughtcrime.securesms.util.ViewUtil;
-import org.thoughtcrime.securesms.util.concurrent.SignalExecutors;
+import org.thoughtcrime.securesms.util.WindowUtil;
 import org.thoughtcrime.securesms.util.concurrent.SimpleTask;
 import org.thoughtcrime.securesms.util.task.SnackbarAsyncTask;
+import org.thoughtcrime.securesms.util.views.Stub;
 import org.whispersystems.libsignal.util.guava.Optional;
 
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -143,8 +150,11 @@ public class ConversationListFragment extends MainFragment implements ActionMode
                                                                       MegaphoneActionController
 {
   public static final short MESSAGE_REQUESTS_REQUEST_CODE_CREATE_NAME = 32562;
+  public static final short SMS_ROLE_REQUEST_CODE                     = 32563;
 
   private static final String TAG = Log.tag(ConversationListFragment.class);
+
+  private static final int MAXIMUM_PINNED_CONVERSATIONS = 4;
 
   private static final int[] EMPTY_IMAGES = new int[] { R.drawable.empty_inbox_1,
                                                         R.drawable.empty_inbox_2,
@@ -154,13 +164,12 @@ public class ConversationListFragment extends MainFragment implements ActionMode
 
   private ActionMode                        actionMode;
   private RecyclerView                      list;
-  private ReminderView                      reminderView;
-  private View                              emptyState;
-  private ImageView                         emptyImage;
+  private Stub<ReminderView>                reminderView;
+  private Stub<ViewGroup>                   emptyState;
   private TextView                          searchEmptyState;
   private PulsingFloatingActionButton       fab;
   private PulsingFloatingActionButton       cameraFab;
-  private SearchToolbar                     searchToolbar;
+  private Stub<SearchToolbar>               searchToolbar;
   private ImageView                         searchAction;
   private View                              toolbarShadow;
   private ConversationListViewModel         viewModel;
@@ -168,9 +177,12 @@ public class ConversationListFragment extends MainFragment implements ActionMode
   private ConversationListAdapter           defaultAdapter;
   private ConversationListSearchAdapter     searchAdapter;
   private StickyHeaderDecoration            searchAdapterDecoration;
-  private ViewGroup                         megaphoneContainer;
+  private Stub<ViewGroup>                   megaphoneContainer;
   private SnapToTopDataObserver             snapToTopDataObserver;
   private Drawable                          archiveDrawable;
+  private LifecycleObserver                 visibilityLifecycleObserver;
+
+  private Stopwatch startupStopwatch;
 
   public static ConversationListFragment newInstance() {
     return new ConversationListFragment();
@@ -180,6 +192,7 @@ public class ConversationListFragment extends MainFragment implements ActionMode
   public void onCreate(Bundle icicle) {
     super.onCreate(icicle);
     setHasOptionsMenu(true);
+    startupStopwatch = new Stopwatch("startup");
   }
 
   @Override
@@ -189,33 +202,29 @@ public class ConversationListFragment extends MainFragment implements ActionMode
 
   @Override
   public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
-    reminderView       = view.findViewById(R.id.reminder);
     list               = view.findViewById(R.id.list);
     fab                = view.findViewById(R.id.fab);
     cameraFab          = view.findViewById(R.id.camera_fab);
-    emptyState         = view.findViewById(R.id.empty_state);
-    emptyImage         = view.findViewById(R.id.empty);
     searchEmptyState   = view.findViewById(R.id.search_no_results);
-    searchToolbar      = view.findViewById(R.id.search_toolbar);
     searchAction       = view.findViewById(R.id.search_action);
     toolbarShadow      = view.findViewById(R.id.conversation_list_toolbar_shadow);
-    megaphoneContainer = view.findViewById(R.id.megaphone_container);
+    reminderView       = new Stub<>(view.findViewById(R.id.reminder));
+    emptyState         = new Stub<>(view.findViewById(R.id.empty_state));
+    searchToolbar      = new Stub<>(view.findViewById(R.id.search_toolbar));
+    megaphoneContainer = new Stub<>(view.findViewById(R.id.megaphone_container));
 
-    Toolbar toolbar = view.findViewById(getToolbarRes());
+    Toolbar toolbar = getToolbar(view);
     toolbar.setVisibility(View.VISIBLE);
     ((AppCompatActivity) requireActivity()).setSupportActionBar(toolbar);
 
     fab.show();
     cameraFab.show();
 
-    reminderView.setOnDismissListener(this::updateReminders);
-
-    list.setHasFixedSize(true);
     list.setLayoutManager(new LinearLayoutManager(requireActivity()));
     list.setItemAnimator(new DeleteItemAnimator());
     list.addOnScrollListener(new ScrollListener());
 
-    snapToTopDataObserver = new SnapToTopDataObserver(list, null);
+    snapToTopDataObserver = new SnapToTopDataObserver(list);
 
     new ItemTouchHelper(new ArchiveListenerCallback()).attachToRecyclerView(list);
 
@@ -224,15 +233,15 @@ public class ConversationListFragment extends MainFragment implements ActionMode
       Permissions.with(requireActivity())
                  .request(Manifest.permission.CAMERA)
                  .ifNecessary()
-                 .withRationaleDialog(getString(R.string.ConversationActivity_to_capture_photos_and_video_allow_signal_access_to_the_camera), R.drawable.ic_camera_solid_24)
+                 .withRationaleDialog(getString(R.string.ConversationActivity_to_capture_photos_and_video_allow_signal_access_to_the_camera), R.drawable.ic_camera_24)
                  .withPermanentDenialDialog(getString(R.string.ConversationActivity_signal_needs_the_camera_permission_to_take_photos_or_video))
                  .onAllGranted(() -> startActivity(MediaSendActivity.buildCameraFirstIntent(requireActivity())))
                  .onAnyDenied(() -> Toast.makeText(requireContext(), R.string.ConversationActivity_signal_needs_camera_permissions_to_take_photos_or_video, Toast.LENGTH_LONG).show())
                  .execute();
     });
 
-    initializeListAdapters();
     initializeViewModel();
+    initializeListAdapters();
     initializeTypingObserver();
     initializeSearchListener();
 
@@ -252,9 +261,9 @@ public class ConversationListFragment extends MainFragment implements ActionMode
       InsightsLauncher.showInsightsModal(requireContext(), requireFragmentManager());
     }
 
-    SimpleTask.run(getLifecycle(), Recipient::self, this::initializeProfileIcon);
+    SimpleTask.run(getViewLifecycleOwner().getLifecycle(), Recipient::self, this::initializeProfileIcon);
 
-    if (!searchToolbar.isVisible() && list.getAdapter() != defaultAdapter) {
+    if ((!searchToolbar.resolved() || !searchToolbar.get().isVisible()) && list.getAdapter() != defaultAdapter) {
       list.removeItemDecoration(searchAdapterDecoration);
       setAdapter(defaultAdapter);
     }
@@ -268,6 +277,7 @@ public class ConversationListFragment extends MainFragment implements ActionMode
   public void onStart() {
     super.onStart();
     ConversationFragment.prepare(requireContext());
+    ProcessLifecycleOwner.get().getLifecycle().addObserver(visibilityLifecycleObserver);
   }
 
   @Override
@@ -279,14 +289,20 @@ public class ConversationListFragment extends MainFragment implements ActionMode
     EventBus.getDefault().unregister(this);
   }
 
+  @Override
+  public void onStop() {
+    super.onStop();
+    ProcessLifecycleOwner.get().getLifecycle().removeObserver(visibilityLifecycleObserver);
+  }
+
+  @Override
+  public void onCreateOptionsMenu(@NonNull Menu menu, @NonNull MenuInflater inflater) {
+    menu.clear();
+    inflater.inflate(R.menu.text_secure_normal, menu);
+  }
 
   @Override
   public void onPrepareOptionsMenu(Menu menu) {
-    MenuInflater inflater = requireActivity().getMenuInflater();
-    menu.clear();
-
-    inflater.inflate(R.menu.text_secure_normal, menu);
-
     menu.findItem(R.id.menu_insights).setVisible(TextSecurePreferences.isSmsEnabled(requireContext()));
     menu.findItem(R.id.menu_clear_passphrase).setVisible(!TextSecurePreferences.isPasswordDisabled(requireContext()));
   }
@@ -313,10 +329,10 @@ public class ConversationListFragment extends MainFragment implements ActionMode
   }
 
   private boolean closeSearchIfOpen() {
-    if (searchToolbar.isVisible() || activeAdapter == searchAdapter) {
+    if ((searchToolbar.resolved() && searchToolbar.get().isVisible()) || activeAdapter == searchAdapter) {
       list.removeItemDecoration(searchAdapterDecoration);
       setAdapter(defaultAdapter);
-      searchToolbar.collapse();
+      searchToolbar.get().collapse();
       return true;
     }
 
@@ -330,7 +346,7 @@ public class ConversationListFragment extends MainFragment implements ActionMode
     }
 
     if (requestCode == CreateKbsPinActivity.REQUEST_NEW_PIN) {
-      Snackbar.make(fab, R.string.ConfirmKbsPinFragment__pin_created, Snackbar.LENGTH_LONG).show();
+      Snackbar.make(fab, R.string.ConfirmKbsPinFragment__pin_created, Snackbar.LENGTH_LONG).setTextColor(Color.WHITE).show();
       viewModel.onMegaphoneCompleted(Megaphones.Event.PINS_FOR_ALL);
     }
   }
@@ -352,7 +368,7 @@ public class ConversationListFragment extends MainFragment implements ActionMode
   @Override
   public void onContactClicked(@NonNull Recipient contact) {
     SimpleTask.run(getViewLifecycleOwner().getLifecycle(), () -> {
-      return DatabaseFactory.getThreadDatabase(getContext()).getThreadIdIfExistsFor(contact);
+      return DatabaseFactory.getThreadDatabase(getContext()).getThreadIdIfExistsFor(contact.getId());
     }, threadId -> {
       hideKeyboard();
       getNavigator().goToConversation(contact.getId(),
@@ -388,7 +404,9 @@ public class ConversationListFragment extends MainFragment implements ActionMode
 
   @Override
   public void onMegaphoneToastRequested(@NonNull String string) {
-    Snackbar.make(fab, string, Snackbar.LENGTH_LONG).show();
+    Snackbar.make(fab, string, Snackbar.LENGTH_LONG)
+            .setTextColor(Color.WHITE)
+            .show();
   }
 
   @Override
@@ -406,6 +424,22 @@ public class ConversationListFragment extends MainFragment implements ActionMode
     viewModel.onMegaphoneCompleted(event);
   }
 
+  @Override
+  public void onMegaphoneDialogFragmentRequested(@NonNull DialogFragment dialogFragment) {
+    dialogFragment.show(getChildFragmentManager(), "megaphone_dialog");
+  }
+
+  private void initializeReminderView() {
+    reminderView.get().setOnDismissListener(this::updateReminders);
+    reminderView.get().setOnActionClickListener(this::onReminderAction);
+  }
+
+  private void onReminderAction(@IdRes int reminderActionId) {
+    if (reminderActionId == R.id.reminder_action_update_now) {
+      PlayStoreUtil.openPlayStoreOrOurApkDownloadPage(requireContext());
+    }
+  }
+
   private void hideKeyboard() {
     InputMethodManager imm = ServiceUtil.getInputMethodManager(requireContext());
     imm.hideSoftInputFromWindow(requireView().getWindowToken(), 0);
@@ -420,36 +454,36 @@ public class ConversationListFragment extends MainFragment implements ActionMode
 
   private void initializeSearchListener() {
     searchAction.setOnClickListener(v -> {
-      searchToolbar.display(searchAction.getX() + (searchAction.getWidth() / 2.0f),
-                            searchAction.getY() + (searchAction.getHeight() / 2.0f));
-    });
+      searchToolbar.get().display(searchAction.getX() + (searchAction.getWidth() / 2.0f),
+                                  searchAction.getY() + (searchAction.getHeight() / 2.0f));
 
-    searchToolbar.setListener(new SearchToolbar.SearchListener() {
-      @Override
-      public void onSearchTextChange(String text) {
-        String trimmed = text.trim();
+      searchToolbar.get().setListener(new SearchToolbar.SearchListener() {
+        @Override
+        public void onSearchTextChange(String text) {
+          String trimmed = text.trim();
 
-        viewModel.updateQuery(trimmed);
+          viewModel.updateQuery(trimmed);
 
-        if (trimmed.length() > 0) {
-          if (activeAdapter != searchAdapter) {
-            setAdapter(searchAdapter);
-            list.removeItemDecoration(searchAdapterDecoration);
-            list.addItemDecoration(searchAdapterDecoration);
-          }
-        } else {
-          if (activeAdapter != defaultAdapter) {
-            list.removeItemDecoration(searchAdapterDecoration);
-            setAdapter(defaultAdapter);
+          if (trimmed.length() > 0) {
+            if (activeAdapter != searchAdapter) {
+              setAdapter(searchAdapter);
+              list.removeItemDecoration(searchAdapterDecoration);
+              list.addItemDecoration(searchAdapterDecoration);
+            }
+          } else {
+            if (activeAdapter != defaultAdapter) {
+              list.removeItemDecoration(searchAdapterDecoration);
+              setAdapter(defaultAdapter);
+            }
           }
         }
-      }
 
-      @Override
-      public void onSearchClosed() {
-        list.removeItemDecoration(searchAdapterDecoration);
-        setAdapter(defaultAdapter);
-      }
+        @Override
+        public void onSearchClosed() {
+          list.removeItemDecoration(searchAdapterDecoration);
+          setAdapter(defaultAdapter);
+        }
+      });
     });
   }
 
@@ -459,6 +493,19 @@ public class ConversationListFragment extends MainFragment implements ActionMode
     searchAdapterDecoration = new StickyHeaderDecoration(searchAdapter, false, false);
 
     setAdapter(defaultAdapter);
+
+    defaultAdapter.registerAdapterDataObserver(new RecyclerView.AdapterDataObserver() {
+      @Override
+      public void onItemRangeInserted(int positionStart, int itemCount) {
+        startupStopwatch.split("data-set");
+        defaultAdapter.unregisterAdapterDataObserver(this);
+        list.post(() -> {
+          AppStartup.getInstance().onCriticalRenderEventEnd();
+          startupStopwatch.split("first-render");
+          startupStopwatch.stop(TAG);
+        });
+      }
+    });
   }
 
   @SuppressWarnings("rawtypes")
@@ -471,6 +518,10 @@ public class ConversationListFragment extends MainFragment implements ActionMode
       return;
     }
 
+    if (adapter instanceof ConversationListAdapter) {
+      ((ConversationListAdapter) adapter).setPagingController(viewModel.getPagingController());
+    }
+
     list.setAdapter(adapter);
 
     if (adapter == defaultAdapter) {
@@ -481,7 +532,7 @@ public class ConversationListFragment extends MainFragment implements ActionMode
   }
 
   private void initializeTypingObserver() {
-    ApplicationContext.getInstance(requireContext()).getTypingStatusRepository().getTypingThreads().observe(this, threadIds -> {
+    ApplicationDependencies.getTypingStatusRepository().getTypingThreads().observe(this, threadIds -> {
       if (threadIds == null) {
         threadIds = Collections.emptySet();
       }
@@ -497,16 +548,17 @@ public class ConversationListFragment extends MainFragment implements ActionMode
   private void initializeViewModel() {
     viewModel = ViewModelProviders.of(this, new ConversationListViewModel.Factory(isArchived())).get(ConversationListViewModel.class);
 
-    viewModel.getSearchResult().observe(this, this::onSearchResultChanged);
-    viewModel.getMegaphone().observe(this, this::onMegaphoneChanged);
-    viewModel.getConversationList().observe(this, this::onSubmitList);
+    viewModel.getSearchResult().observe(getViewLifecycleOwner(), this::onSearchResultChanged);
+    viewModel.getMegaphone().observe(getViewLifecycleOwner(), this::onMegaphoneChanged);
+    viewModel.getConversationList().observe(getViewLifecycleOwner(), this::onSubmitList);
+    viewModel.hasNoConversations().observe(getViewLifecycleOwner(), this::updateEmptyState);
 
-    ProcessLifecycleOwner.get().getLifecycle().addObserver(new DefaultLifecycleObserver() {
+    visibilityLifecycleObserver = new DefaultLifecycleObserver() {
       @Override
       public void onStart(@NonNull LifecycleOwner owner) {
         viewModel.onVisible();
       }
-    });
+    };
   }
 
   private void onSearchResultChanged(@Nullable SearchResult result) {
@@ -523,20 +575,22 @@ public class ConversationListFragment extends MainFragment implements ActionMode
 
   private void onMegaphoneChanged(@Nullable Megaphone megaphone) {
     if (megaphone == null) {
-      megaphoneContainer.setVisibility(View.GONE);
-      megaphoneContainer.removeAllViews();
+      if (megaphoneContainer.resolved()) {
+        megaphoneContainer.get().setVisibility(View.GONE);
+        megaphoneContainer.get().removeAllViews();
+      }
       return;
     }
 
     View view = MegaphoneViewBuilder.build(requireContext(), megaphone, this);
 
-    megaphoneContainer.removeAllViews();
+    megaphoneContainer.get().removeAllViews();
 
     if (view != null) {
-      megaphoneContainer.addView(view);
-      megaphoneContainer.setVisibility(View.VISIBLE);
+      megaphoneContainer.get().addView(view);
+      megaphoneContainer.get().setVisibility(View.VISIBLE);
     } else {
-      megaphoneContainer.setVisibility(View.GONE);
+      megaphoneContainer.get().setVisibility(View.GONE);
 
       if (megaphone.getOnVisibleListener() != null) {
         megaphone.getOnVisibleListener().onEvent(megaphone, this);
@@ -560,7 +614,7 @@ public class ConversationListFragment extends MainFragment implements ActionMode
       } else if (OutdatedBuildReminder.isEligible()) {
         return Optional.of(new OutdatedBuildReminder(context));
       } else if (DefaultSmsReminder.isEligible(context)) {
-        return Optional.of(new DefaultSmsReminder(context));
+        return Optional.of(new DefaultSmsReminder(this, SMS_ROLE_REQUEST_CODE));
       } else if (Util.isDefaultSmsProvider(context) && SystemSmsImportReminder.isEligible(context)) {
         return Optional.of((new SystemSmsImportReminder(context)));
       } else if (PushRegistrationReminder.isEligible(context)) {
@@ -574,9 +628,12 @@ public class ConversationListFragment extends MainFragment implements ActionMode
       }
     }, reminder -> {
       if (reminder.isPresent() && getActivity() != null && !isRemoving()) {
-        reminderView.showReminder(reminder.get());
-      } else if (!reminder.isPresent()) {
-        reminderView.hide();
+        if (!reminderView.resolved()) {
+          initializeReminderView();
+        }
+        reminderView.get().showReminder(reminder.get());
+      } else if (reminderView.resolved() && !reminder.isPresent()) {
+        reminderView.get().hide();
       }
     });
   }
@@ -655,7 +712,8 @@ public class ConversationListFragment extends MainFragment implements ActionMode
     int       count                 = selectedConversations.size();
     String    snackBarTitle         = getResources().getQuantityString(getArchivedSnackbarTitleRes(), count, count);
 
-    new SnackbarAsyncTask<Void>(getView(),
+    new SnackbarAsyncTask<Void>(getViewLifecycleOwner().getLifecycle(),
+                                requireView(),
                                 snackBarTitle,
                                 getString(R.string.ConversationListFragment_undo),
                                 getResources().getColor(R.color.amber_500),
@@ -674,16 +732,12 @@ public class ConversationListFragment extends MainFragment implements ActionMode
 
       @Override
       protected void executeAction(@Nullable Void parameter) {
-        for (long threadId : selectedConversations) {
-          archiveThread(threadId);
-        }
+        archiveThreads(selectedConversations);
       }
 
       @Override
       protected void reverseAction(@Nullable Void parameter) {
-        for (long threadId : selectedConversations) {
-          reverseArchiveThread(threadId);
-        }
+        reverseArchiveThreads(selectedConversations);
       }
     }.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
   }
@@ -692,7 +746,7 @@ public class ConversationListFragment extends MainFragment implements ActionMode
   private void handleDeleteAllSelected() {
     int                 conversationsCount = defaultAdapter.getBatchSelectionIds().size();
     AlertDialog.Builder alert              = new AlertDialog.Builder(getActivity());
-    alert.setIconAttribute(R.attr.dialog_alert_icon);
+    alert.setIcon(R.drawable.ic_warning);
     alert.setTitle(getActivity().getResources().getQuantityString(R.plurals.ConversationListFragment_delete_selected_conversations,
                                                                   conversationsCount, conversationsCount));
     alert.setMessage(getActivity().getResources().getQuantityString(R.plurals.ConversationListFragment_this_will_permanently_delete_all_n_selected_conversations,
@@ -737,6 +791,51 @@ public class ConversationListFragment extends MainFragment implements ActionMode
     alert.show();
   }
 
+  private void handlePinAllSelected() {
+    final Set<Long> toPin = new LinkedHashSet<>(Stream.of(defaultAdapter.getBatchSelection())
+                                                      .filterNot(conversation -> conversation.getThreadRecord().isPinned())
+                                                      .map(conversation -> conversation.getThreadRecord().getThreadId())
+                                                      .toList());
+
+    if (toPin.size() + viewModel.getPinnedCount() > MAXIMUM_PINNED_CONVERSATIONS) {
+      Snackbar.make(fab,
+                    getString(R.string.conversation_list__you_can_only_pin_up_to_d_chats, MAXIMUM_PINNED_CONVERSATIONS),
+                    Snackbar.LENGTH_LONG)
+              .setTextColor(Color.WHITE)
+              .show();
+      actionMode.finish();
+      return;
+    }
+
+    SimpleTask.run(SignalExecutors.BOUNDED, () -> {
+      ThreadDatabase db = DatabaseFactory.getThreadDatabase(ApplicationDependencies.getApplication());
+
+      db.pinConversations(toPin);
+
+      return null;
+    }, unused -> {
+      if (actionMode != null) {
+        actionMode.finish();
+      }
+    });
+  }
+
+  private void handleUnpinAllSelected() {
+    final Set<Long> toPin = new HashSet<>(defaultAdapter.getBatchSelectionIds());
+
+    SimpleTask.run(SignalExecutors.BOUNDED, () -> {
+      ThreadDatabase db = DatabaseFactory.getThreadDatabase(ApplicationDependencies.getApplication());
+
+      db.unpinConversations(toPin);
+
+      return null;
+    }, unused -> {
+      if (actionMode != null) {
+        actionMode.finish();
+      }
+    });
+  }
+
   private void handleSelectAllThreads() {
     defaultAdapter.selectAllThreads();
     actionMode.setTitle(String.valueOf(defaultAdapter.getBatchSelectionIds().size()));
@@ -746,24 +845,30 @@ public class ConversationListFragment extends MainFragment implements ActionMode
     getNavigator().goToConversation(recipient.getId(), threadId, distributionType, -1);
   }
 
-  private void onSubmitList(@NonNull ConversationListViewModel.ConversationList conversationList) {
-    if (conversationList.isEmpty()) {
+  private void onSubmitList(@NonNull List<Conversation> conversationList) {
+    defaultAdapter.submitList(conversationList);
+    onPostSubmitList();
+  }
+
+  private void updateEmptyState(boolean isConversationEmpty) {
+    if (isConversationEmpty) {
+      Log.i(TAG, "Received an empty data set.");
       list.setVisibility(View.INVISIBLE);
-      emptyState.setVisibility(View.VISIBLE);
-      emptyImage.setImageResource(EMPTY_IMAGES[(int) (Math.random() * EMPTY_IMAGES.length)]);
+      emptyState.get().setVisibility(View.VISIBLE);
       fab.startPulse(3 * 1000);
       cameraFab.startPulse(3 * 1000);
+
+      ImageView emptyImage = emptyState.get().findViewById(R.id.empty);
+      emptyImage.setImageResource(EMPTY_IMAGES[(int) (Math.random() * EMPTY_IMAGES.length)]);
     } else {
       list.setVisibility(View.VISIBLE);
-      emptyState.setVisibility(View.GONE);
       fab.stopPulse();
       cameraFab.stopPulse();
+
+      if (emptyState.resolved()) {
+        emptyState.get().setVisibility(View.GONE);
+      }
     }
-
-    defaultAdapter.submitList(conversationList.getConversations());
-    defaultAdapter.updateArchived(conversationList.getArchivedCount());
-
-    onPostSubmitList();
   }
 
   protected void onPostSubmitList() {
@@ -787,10 +892,15 @@ public class ConversationListFragment extends MainFragment implements ActionMode
 
   @Override
   public boolean onConversationLongClick(Conversation conversation) {
-    actionMode = ((AppCompatActivity) getActivity()).startSupportActionMode(ConversationListFragment.this);
+    if (actionMode != null) {
+      onConversationClick(conversation);
+      return true;
+    }
 
     defaultAdapter.initializeBatchMode(true);
     defaultAdapter.toggleConversationInBatchSet(conversation);
+
+    actionMode = ((AppCompatActivity) getActivity()).startSupportActionMode(ConversationListFragment.this);
 
     return true;
   }
@@ -799,19 +909,13 @@ public class ConversationListFragment extends MainFragment implements ActionMode
   public boolean onCreateActionMode(ActionMode mode, Menu menu) {
     MenuInflater inflater = getActivity().getMenuInflater();
 
+    inflater.inflate(R.menu.conversation_list_batch_pin, menu);
     inflater.inflate(getActionModeMenuRes(), menu);
     inflater.inflate(R.menu.conversation_list_batch, menu);
 
     mode.setTitle("1");
 
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-      getActivity().getWindow().setStatusBarColor(getResources().getColor(R.color.action_mode_status_bar));
-    }
-
-    if (Build.VERSION.SDK_INT >= 23) {
-      int current = getActivity().getWindow().getDecorView().getSystemUiVisibility();
-      getActivity().getWindow().getDecorView().setSystemUiVisibility(current & ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
-    }
+    WindowUtil.setStatusBarColor(requireActivity().getWindow(), getResources().getColor(R.color.action_mode_status_bar));
 
     return true;
   }
@@ -827,6 +931,8 @@ public class ConversationListFragment extends MainFragment implements ActionMode
     switch (item.getItemId()) {
       case R.id.menu_select_all:       handleSelectAllThreads();     return true;
       case R.id.menu_delete_selected:  handleDeleteAllSelected();    return true;
+      case R.id.menu_pin_selected:     handlePinAllSelected();       return true;
+      case R.id.menu_unpin_selected:   handleUnpinAllSelected();     return true;
       case R.id.menu_archive_selected: handleArchiveAllSelected();   return true;
       case R.id.menu_mark_as_read:     handleMarkSelectedAsRead();   return true;
       case R.id.menu_mark_as_unread:   handleMarkSelectedAsUnread(); return true;
@@ -841,7 +947,7 @@ public class ConversationListFragment extends MainFragment implements ActionMode
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
       TypedArray color = getActivity().getTheme().obtainStyledAttributes(new int[] {android.R.attr.statusBarColor});
-      getActivity().getWindow().setStatusBarColor(color.getColor(0, Color.BLACK));
+      WindowUtil.setStatusBarColor(getActivity().getWindow(), color.getColor(0, Color.BLACK));
       color.recycle();
     }
 
@@ -871,7 +977,9 @@ public class ConversationListFragment extends MainFragment implements ActionMode
   }
 
   private void setCorrectMenuVisibility(@NonNull Menu menu) {
-    boolean hasUnread = Stream.of(defaultAdapter.getBatchSelection()).anyMatch(conversation -> !conversation.getThreadRecord().isRead());
+    boolean hasUnread   = Stream.of(defaultAdapter.getBatchSelection()).anyMatch(conversation -> !conversation.getThreadRecord().isRead());
+    boolean hasUnpinned = Stream.of(defaultAdapter.getBatchSelection()).anyMatch(conversation -> !conversation.getThreadRecord().isPinned());
+    boolean canPin      = viewModel.getPinnedCount() < MAXIMUM_PINNED_CONVERSATIONS;
 
     if (hasUnread) {
       menu.findItem(R.id.menu_mark_as_unread).setVisible(false);
@@ -880,10 +988,21 @@ public class ConversationListFragment extends MainFragment implements ActionMode
       menu.findItem(R.id.menu_mark_as_unread).setVisible(true);
       menu.findItem(R.id.menu_mark_as_read).setVisible(false);
     }
+
+    if (!isArchived() && hasUnpinned && canPin) {
+      menu.findItem(R.id.menu_pin_selected).setVisible(true);
+      menu.findItem(R.id.menu_unpin_selected).setVisible(false);
+    } else if (!isArchived() && !hasUnpinned) {
+      menu.findItem(R.id.menu_pin_selected).setVisible(false);
+      menu.findItem(R.id.menu_unpin_selected).setVisible(true);
+    } else {
+      menu.findItem(R.id.menu_pin_selected).setVisible(false);
+      menu.findItem(R.id.menu_unpin_selected).setVisible(false);
+    }
   }
 
-  protected @IdRes int getToolbarRes() {
-    return R.id.toolbar;
+  protected Toolbar getToolbar(@NonNull View rootView) {
+    return rootView.findViewById(R.id.toolbar);
   }
 
   protected @PluralsRes int getArchivedSnackbarTitleRes() {
@@ -899,22 +1018,24 @@ public class ConversationListFragment extends MainFragment implements ActionMode
   }
 
   @WorkerThread
-  protected void archiveThread(long threadId) {
-    DatabaseFactory.getThreadDatabase(getActivity()).archiveConversation(threadId);
+  protected void archiveThreads(Set<Long> threadIds) {
+    DatabaseFactory.getThreadDatabase(getActivity()).setArchived(threadIds, true);
   }
 
   @WorkerThread
-  protected void reverseArchiveThread(long threadId) {
-    DatabaseFactory.getThreadDatabase(getActivity()).unarchiveConversation(threadId);
+  protected void reverseArchiveThreads(Set<Long> threadIds) {
+    DatabaseFactory.getThreadDatabase(getActivity()).setArchived(threadIds, false);
   }
 
   @SuppressLint("StaticFieldLeak")
   protected void onItemSwiped(long threadId, int unreadCount) {
-    new SnackbarAsyncTask<Long>(getView(),
-        getResources().getQuantityString(R.plurals.ConversationListFragment_conversations_archived, 1, 1),
-        getString(R.string.ConversationListFragment_undo),
-        getResources().getColor(R.color.amber_500),
-        Snackbar.LENGTH_LONG, false)
+    new SnackbarAsyncTask<Long>(getViewLifecycleOwner().getLifecycle(),
+                                requireView(),
+                                getResources().getQuantityString(R.plurals.ConversationListFragment_conversations_archived, 1, 1),
+                                getString(R.string.ConversationListFragment_undo),
+                                getResources().getColor(R.color.amber_500),
+                                Snackbar.LENGTH_LONG,
+                                false)
     {
       @Override
       protected void executeAction(@Nullable Long parameter) {
@@ -955,8 +1076,9 @@ public class ConversationListFragment extends MainFragment implements ActionMode
 
     @Override
     public int getSwipeDirs(@NonNull RecyclerView recyclerView, @NonNull RecyclerView.ViewHolder viewHolder) {
-      if (viewHolder.itemView instanceof ConversationListItemAction ||
-          actionMode != null                                        ||
+      if (viewHolder.itemView instanceof ConversationListItemAction      ||
+          viewHolder instanceof ConversationListAdapter.HeaderViewHolder ||
+          actionMode != null                                             ||
           activeAdapter == searchAdapter)
       {
         return 0;

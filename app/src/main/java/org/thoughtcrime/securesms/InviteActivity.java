@@ -27,6 +27,7 @@ import org.thoughtcrime.securesms.components.ContactFilterToolbar.OnFilterChange
 import org.thoughtcrime.securesms.contacts.ContactsCursorLoader.DisplayMode;
 import org.thoughtcrime.securesms.contacts.SelectedContact;
 import org.thoughtcrime.securesms.database.DatabaseFactory;
+import org.thoughtcrime.securesms.groups.SelectionLimits;
 import org.thoughtcrime.securesms.recipients.Recipient;
 import org.thoughtcrime.securesms.recipients.RecipientId;
 import org.thoughtcrime.securesms.sms.MessageSender;
@@ -40,7 +41,6 @@ import org.thoughtcrime.securesms.util.concurrent.ListenableFuture.Listener;
 import org.thoughtcrime.securesms.util.task.ProgressDialogAsyncTask;
 import org.whispersystems.libsignal.util.guava.Optional;
 
-import java.util.List;
 import java.util.concurrent.ExecutionException;
 
 public class InviteActivity extends PassphraseRequiredActivity implements ContactSelectionListFragment.OnContactSelectedListener {
@@ -63,7 +63,8 @@ public class InviteActivity extends PassphraseRequiredActivity implements Contac
   @Override
   protected void onCreate(Bundle savedInstanceState, boolean ready) {
     getIntent().putExtra(ContactSelectionListFragment.DISPLAY_MODE, DisplayMode.FLAG_SMS);
-    getIntent().putExtra(ContactSelectionListFragment.MULTI_SELECT, true);
+    getIntent().putExtra(ContactSelectionListFragment.SELECTION_LIMITS, SelectionLimits.NO_LIMITS);
+    getIntent().putExtra(ContactSelectionListFragment.HIDE_COUNT, true);
     getIntent().putExtra(ContactSelectionListFragment.REFRESHABLE, false);
 
     setContentView(R.layout.invite_activity);
@@ -92,18 +93,18 @@ public class InviteActivity extends PassphraseRequiredActivity implements Contac
     slideInAnimation  = loadAnimation(R.anim.slide_from_bottom);
     slideOutAnimation = loadAnimation(R.anim.slide_to_bottom);
 
-    View                 shareButton     = ViewUtil.findById(this, R.id.share_button);
-    View                 smsButton       = ViewUtil.findById(this, R.id.sms_button);
-    Button               smsCancelButton = ViewUtil.findById(this, R.id.cancel_sms_button);
-    ContactFilterToolbar contactFilter   = ViewUtil.findById(this, R.id.contact_filter);
+    View                 shareButton     = findViewById(R.id.share_button);
+    View                 smsButton       = findViewById(R.id.sms_button);
+    Button               smsCancelButton = findViewById(R.id.cancel_sms_button);
+    ContactFilterToolbar contactFilter   = findViewById(R.id.contact_filter);
 
-    inviteText        = ViewUtil.findById(this, R.id.invite_text);
-    smsSendFrame      = ViewUtil.findById(this, R.id.sms_send_frame);
-    smsSendButton     = ViewUtil.findById(this, R.id.send_sms_button);
+    inviteText        = findViewById(R.id.invite_text);
+    smsSendFrame      = findViewById(R.id.sms_send_frame);
+    smsSendButton     = findViewById(R.id.send_sms_button);
     contactsFragment  = (ContactSelectionListFragment)getSupportFragmentManager().findFragmentById(R.id.contact_selection_list_fragment);
 
     inviteText.setText(getString(R.string.InviteActivity_lets_switch_to_signal, getString(R.string.install_url)));
-    updateSmsButtonText();
+    updateSmsButtonText(contactsFragment.getSelectedContacts().size());
 
     contactsFragment.setOnContactSelectedListener(this);
     shareButton.setOnClickListener(new ShareClickListener());
@@ -121,13 +122,14 @@ public class InviteActivity extends PassphraseRequiredActivity implements Contac
   }
 
   @Override
-  public void onContactSelected(Optional<RecipientId> recipientId, String number) {
-    updateSmsButtonText();
+  public boolean onBeforeContactSelected(Optional<RecipientId> recipientId, String number) {
+    updateSmsButtonText(contactsFragment.getSelectedContacts().size() + 1);
+    return true;
   }
 
   @Override
   public void onContactDeselected(Optional<RecipientId> recipientId, String number) {
-    updateSmsButtonText();
+    updateSmsButtonText(contactsFragment.getSelectedContacts().size());
   }
 
   private void sendSmsInvites() {
@@ -137,12 +139,11 @@ public class InviteActivity extends PassphraseRequiredActivity implements Contac
                                            .toArray(new SelectedContact[0]));
   }
 
-  private void updateSmsButtonText() {
-    List<SelectedContact> selectedContacts = contactsFragment.getSelectedContacts();
+  private void updateSmsButtonText(int count) {
     smsSendButton.setText(getResources().getQuantityString(R.plurals.InviteActivity_send_sms_to_friends,
-                                                           selectedContacts.size(),
-                                                           selectedContacts.size()));
-    smsSendButton.setEnabled(!selectedContacts.isEmpty());
+                                                           count,
+                                                           count));
+    smsSendButton.setEnabled(count > 0);
   }
 
   @Override public void onBackPressed() {
@@ -156,17 +157,17 @@ public class InviteActivity extends PassphraseRequiredActivity implements Contac
   private void cancelSmsSelection() {
     setPrimaryColorsToolbarNormal();
     contactsFragment.reset();
-    updateSmsButtonText();
+    updateSmsButtonText(contactsFragment.getSelectedContacts().size());
     ViewUtil.animateOut(smsSendFrame, slideOutAnimation, View.GONE);
   }
 
   private void setPrimaryColorsToolbarNormal() {
     primaryToolbar.setBackgroundColor(0);
     primaryToolbar.getNavigationIcon().setColorFilter(null);
-    primaryToolbar.setTitleTextColor(ThemeUtil.getThemedColor(this, R.attr.title_text_color_primary));
+    primaryToolbar.setTitleTextColor(ContextCompat.getColor(this, R.color.signal_text_primary));
 
     if (Build.VERSION.SDK_INT >= 23) {
-      getWindow().setStatusBarColor(ThemeUtil.getThemedColor(this, android.R.attr.statusBarColor));
+      WindowUtil.setStatusBarColor(getWindow(), ThemeUtil.getThemedColor(this, android.R.attr.statusBarColor));
       getWindow().setNavigationBarColor(ThemeUtil.getThemedColor(this, android.R.attr.navigationBarColor));
       WindowUtil.setLightStatusBarFromTheme(this);
     }
@@ -176,11 +177,11 @@ public class InviteActivity extends PassphraseRequiredActivity implements Contac
 
   private void setPrimaryColorsToolbarForSms() {
     primaryToolbar.setBackgroundColor(ContextCompat.getColor(this, R.color.core_ultramarine));
-    primaryToolbar.getNavigationIcon().setColorFilter(ThemeUtil.getThemedColor(this, R.attr.conversation_subtitle_color), PorterDuff.Mode.SRC_IN);
-    primaryToolbar.setTitleTextColor(ThemeUtil.getThemedColor(this, R.attr.conversation_title_color));
+    primaryToolbar.getNavigationIcon().setColorFilter(ContextCompat.getColor(this, R.color.signal_text_toolbar_subtitle), PorterDuff.Mode.SRC_IN);
+    primaryToolbar.setTitleTextColor(ContextCompat.getColor(this, R.color.signal_text_toolbar_title));
 
     if (Build.VERSION.SDK_INT >= 23) {
-      getWindow().setStatusBarColor(ContextCompat.getColor(this, R.color.core_ultramarine));
+      WindowUtil.setStatusBarColor(getWindow(), ContextCompat.getColor(this, R.color.core_ultramarine));
       WindowUtil.clearLightStatusBar(getWindow());
     }
 

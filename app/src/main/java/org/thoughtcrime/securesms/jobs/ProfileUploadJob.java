@@ -4,6 +4,7 @@ import android.content.Context;
 
 import androidx.annotation.NonNull;
 
+import org.signal.core.util.logging.Log;
 import org.signal.zkgroup.profiles.ProfileKey;
 import org.thoughtcrime.securesms.crypto.ProfileKeyUtil;
 import org.thoughtcrime.securesms.database.DatabaseFactory;
@@ -14,10 +15,15 @@ import org.thoughtcrime.securesms.jobmanager.impl.NetworkConstraint;
 import org.thoughtcrime.securesms.profiles.AvatarHelper;
 import org.thoughtcrime.securesms.profiles.ProfileName;
 import org.thoughtcrime.securesms.recipients.Recipient;
+import org.thoughtcrime.securesms.util.TextSecurePreferences;
 import org.whispersystems.signalservice.api.SignalServiceAccountManager;
 import org.whispersystems.signalservice.api.util.StreamDetails;
 
+import java.util.concurrent.TimeUnit;
+
 public final class ProfileUploadJob extends BaseJob {
+
+  private static final String TAG = Log.tag(ProfileUploadJob.class);
 
   public static final String KEY = "ProfileUploadJob";
 
@@ -30,9 +36,9 @@ public final class ProfileUploadJob extends BaseJob {
     this(new Job.Parameters.Builder()
                             .addConstraint(NetworkConstraint.KEY)
                             .setQueue(QUEUE)
-                            .setLifespan(Parameters.IMMORTAL)
+                            .setLifespan(TimeUnit.DAYS.toMillis(30))
                             .setMaxAttempts(Parameters.UNLIMITED)
-                            .setMaxInstances(1)
+                            .setMaxInstancesForFactory(2)
                             .build());
   }
 
@@ -45,6 +51,11 @@ public final class ProfileUploadJob extends BaseJob {
 
   @Override
   protected void onRun() throws Exception {
+    if (!TextSecurePreferences.isPushRegistered(context)) {
+      Log.w(TAG, "Not registered. Skipping.");
+      return;
+    }
+
     ProfileKey  profileKey  = ProfileKeyUtil.getSelfProfileKey();
     ProfileName profileName = Recipient.self().getProfileName();
     String      avatarPath;

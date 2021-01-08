@@ -10,15 +10,15 @@ import androidx.lifecycle.MutableLiveData;
 
 import com.annimon.stream.Stream;
 
+import org.signal.core.util.concurrent.SignalExecutors;
+import org.signal.core.util.logging.Log;
 import org.thoughtcrime.securesms.database.DatabaseFactory;
 import org.thoughtcrime.securesms.database.RecipientDatabase;
 import org.thoughtcrime.securesms.database.RecipientDatabase.MissingRecipientException;
 import org.thoughtcrime.securesms.database.ThreadDatabase;
 import org.thoughtcrime.securesms.database.model.ThreadRecord;
-import org.thoughtcrime.securesms.logging.Log;
 import org.thoughtcrime.securesms.util.LRUCache;
 import org.thoughtcrime.securesms.util.TextSecurePreferences;
-import org.thoughtcrime.securesms.util.concurrent.SignalExecutors;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -149,7 +149,7 @@ public final class LiveRecipientCache {
       ThreadDatabase  threadDatabase = DatabaseFactory.getThreadDatabase(context);
       List<Recipient> recipients     = new ArrayList<>();
 
-      try (ThreadDatabase.Reader reader = threadDatabase.readerFor(threadDatabase.getConversationList())) {
+      try (ThreadDatabase.Reader reader = threadDatabase.readerFor(threadDatabase.getRecentConversationList(CACHE_WARM_MAX, false, false))) {
         int          i      = 0;
         ThreadRecord record = null;
 
@@ -160,8 +160,7 @@ public final class LiveRecipientCache {
       }
 
       Log.d(TAG, "Warming up " + recipients.size() + " recipients.");
-      Collections.reverse(recipients);
-      Stream.of(recipients).map(Recipient::getId).forEach(this::getLive);
+      addToCache(recipients);
     });
   }
 

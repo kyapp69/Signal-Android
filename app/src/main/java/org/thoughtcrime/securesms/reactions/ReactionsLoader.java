@@ -6,21 +6,21 @@ import android.os.Bundle;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.core.util.Pair;
 import androidx.lifecycle.LiveData;
 import androidx.lifecycle.MutableLiveData;
-import androidx.lifecycle.Transformations;
 import androidx.loader.app.LoaderManager;
 import androidx.loader.content.Loader;
 
 import com.annimon.stream.Stream;
 
+import org.signal.core.util.concurrent.SignalExecutors;
+import org.thoughtcrime.securesms.components.emoji.EmojiUtil;
 import org.thoughtcrime.securesms.database.DatabaseFactory;
+import org.thoughtcrime.securesms.database.MmsDatabase;
+import org.thoughtcrime.securesms.database.SmsDatabase;
 import org.thoughtcrime.securesms.database.model.MessageRecord;
-import org.thoughtcrime.securesms.database.model.ReactionRecord;
 import org.thoughtcrime.securesms.recipients.Recipient;
 import org.thoughtcrime.securesms.util.AbstractCursorLoader;
-import org.thoughtcrime.securesms.util.concurrent.SignalExecutors;
 
 import java.util.Collections;
 import java.util.List;
@@ -31,7 +31,7 @@ public class ReactionsLoader implements ReactionsViewModel.Repository, LoaderMan
   private final boolean          isMms;
   private final Context          appContext;
 
-  private MutableLiveData<List<Reaction>> internalLiveData = new MutableLiveData<>();
+  private MutableLiveData<List<ReactionDetails>> internalLiveData = new MutableLiveData<>();
 
   public ReactionsLoader(@NonNull Context context, long messageId, boolean isMms)
   {
@@ -49,16 +49,19 @@ public class ReactionsLoader implements ReactionsViewModel.Repository, LoaderMan
   @Override
   public void onLoadFinished(@NonNull Loader<Cursor> loader, Cursor data) {
     SignalExecutors.BOUNDED.execute(() -> {
-      MessageRecord record = isMms ? DatabaseFactory.getMmsDatabase(appContext).readerFor(data).getNext()
-                                   : DatabaseFactory.getSmsDatabase(appContext).readerFor(data).getNext();
+      data.moveToPosition(-1);
+
+      MessageRecord record = isMms ? MmsDatabase.readerFor(data).getNext()
+                                   : SmsDatabase.readerFor(data).getNext();
 
       if (record == null) {
         internalLiveData.postValue(Collections.emptyList());
       } else {
         internalLiveData.postValue(Stream.of(record.getReactions())
-                                         .map(reactionRecord -> new Reaction(Recipient.resolved(reactionRecord.getAuthor()),
-                                                                             reactionRecord.getEmoji(),
-                                                                             reactionRecord.getDateReceived()))
+                                         .map(reactionRecord -> new ReactionDetails(Recipient.resolved(reactionRecord.getAuthor()),
+                                                                                    EmojiUtil.getCanonicalRepresentation(reactionRecord.getEmoji()),
+                                                                                    reactionRecord.getEmoji(),
+                                                                                    reactionRecord.getDateReceived()))
                                          .toList());
       }
     });
@@ -70,7 +73,7 @@ public class ReactionsLoader implements ReactionsViewModel.Repository, LoaderMan
   }
 
   @Override
-  public LiveData<List<Reaction>> getReactions() {
+  public LiveData<List<ReactionDetails>> getReactions() {
     return internalLiveData;
   }
 
@@ -85,7 +88,7 @@ public class ReactionsLoader implements ReactionsViewModel.Repository, LoaderMan
 
     @Override
     public Cursor getCursor() {
-      return DatabaseFactory.getMmsDatabase(context).getMessage(messageId);
+      return DatabaseFactory.getMmsDatabase(context).getMessageCursor(messageId);
     }
   }
 
@@ -104,27 +107,4 @@ public class ReactionsLoader implements ReactionsViewModel.Repository, LoaderMan
     }
   }
 
-  static class Reaction {
-    private final Recipient sender;
-    private final String    emoji;
-    private final long      timestamp;
-
-    private Reaction(@NonNull Recipient sender, @NonNull String emoji, long timestamp) {
-      this.sender    = sender;
-      this.emoji     = emoji;
-      this.timestamp = timestamp;
-    }
-
-    public @NonNull Recipient getSender() {
-      return sender;
-    }
-
-    public @NonNull String getEmoji() {
-      return emoji;
-    }
-
-    public long getTimestamp() {
-      return timestamp;
-    }
-  }
 }

@@ -5,17 +5,11 @@ import androidx.annotation.NonNull;
 import org.signal.zkgroup.profiles.ProfileKey;
 import org.thoughtcrime.securesms.crypto.ProfileKeyUtil;
 import org.thoughtcrime.securesms.database.DatabaseFactory;
-import org.thoughtcrime.securesms.database.RecipientDatabase;
 import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
 import org.thoughtcrime.securesms.groups.GroupId;
 import org.thoughtcrime.securesms.jobmanager.Data;
 import org.thoughtcrime.securesms.jobmanager.Job;
-import org.thoughtcrime.securesms.jobmanager.impl.NetworkConstraint;
-import org.thoughtcrime.securesms.profiles.AvatarHelper;
 import org.thoughtcrime.securesms.recipients.Recipient;
-import org.whispersystems.signalservice.api.SignalServiceAccountManager;
-import org.whispersystems.signalservice.api.push.exceptions.PushNetworkException;
-import org.whispersystems.signalservice.api.util.StreamDetails;
 
 import java.util.List;
 
@@ -26,9 +20,7 @@ public class RotateProfileKeyJob extends BaseJob {
   public RotateProfileKeyJob() {
     this(new Job.Parameters.Builder()
                            .setQueue("__ROTATE_PROFILE_KEY__")
-                           .addConstraint(NetworkConstraint.KEY)
-                           .setMaxAttempts(25)
-                           .setMaxInstances(1)
+                           .setMaxInstancesForFactory(2)
                            .build());
   }
 
@@ -47,21 +39,13 @@ public class RotateProfileKeyJob extends BaseJob {
   }
 
   @Override
-  public void onRun() throws Exception {
-    SignalServiceAccountManager accountManager    = ApplicationDependencies.getSignalServiceAccountManager();
-    RecipientDatabase           recipientDatabase = DatabaseFactory.getRecipientDatabase(context);
-    ProfileKey                  profileKey        = ProfileKeyUtil.createNew();
-    Recipient                   self              = Recipient.self();
+  public void onRun() {
+    ProfileKey newProfileKey = ProfileKeyUtil.createNew();
+    Recipient  self          = Recipient.self();
 
-    recipientDatabase.setProfileKey(self.getId(), profileKey);
+    DatabaseFactory.getRecipientDatabase(context).setProfileKey(self.getId(), newProfileKey);
 
-     try (StreamDetails avatarStream = AvatarHelper.getSelfProfileAvatarStream(context)) {
-       accountManager.setVersionedProfile(self.getUuid().get(),
-                                          profileKey,
-                                          Recipient.self().getProfileName().serialize(),
-                                          avatarStream);
-     }
-
+    ApplicationDependencies.getJobManager().add(new ProfileUploadJob());
     ApplicationDependencies.getJobManager().add(new RefreshAttributesJob());
 
     updateProfileKeyOnAllV2Groups();
@@ -77,12 +61,11 @@ public class RotateProfileKeyJob extends BaseJob {
 
   @Override
   public void onFailure() {
-
   }
 
   @Override
   protected boolean onShouldRetry(@NonNull Exception exception) {
-    return exception instanceof PushNetworkException;
+    return false;
   }
 
   public static final class Factory implements Job.Factory<RotateProfileKeyJob> {

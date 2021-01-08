@@ -2,10 +2,9 @@ package org.thoughtcrime.securesms.megaphone;
 
 import androidx.annotation.VisibleForTesting;
 
+import org.signal.core.util.logging.Log;
 import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
 import org.thoughtcrime.securesms.keyvalue.SignalStore;
-import org.thoughtcrime.securesms.logging.Log;
-import org.thoughtcrime.securesms.util.FeatureFlags;
 import org.thoughtcrime.securesms.util.TextSecurePreferences;
 
 import java.util.Locale;
@@ -44,6 +43,10 @@ class PinsForAllSchedule implements MegaphoneSchedule {
   }
 
   private static boolean isEnabled() {
+    if (SignalStore.kbsValues().hasOptedOut()) {
+      return false;
+    }
+
     if (SignalStore.kbsValues().hasPin()) {
       return false;
     }

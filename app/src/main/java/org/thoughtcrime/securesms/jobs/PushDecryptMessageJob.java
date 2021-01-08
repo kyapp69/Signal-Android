@@ -8,6 +8,7 @@ import androidx.annotation.NonNull;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
 
+import org.signal.core.util.logging.Log;
 import org.signal.libsignal.metadata.InvalidMetadataMessageException;
 import org.signal.libsignal.metadata.InvalidMetadataVersionException;
 import org.signal.libsignal.metadata.ProtocolDuplicateMessageException;
@@ -34,7 +35,6 @@ import org.thoughtcrime.securesms.groups.GroupId;
 import org.thoughtcrime.securesms.jobmanager.Data;
 import org.thoughtcrime.securesms.jobmanager.Job;
 import org.thoughtcrime.securesms.jobmanager.JobManager;
-import org.thoughtcrime.securesms.logging.Log;
 import org.thoughtcrime.securesms.notifications.NotificationChannels;
 import org.thoughtcrime.securesms.transport.RetryLaterException;
 import org.thoughtcrime.securesms.util.GroupUtil;
@@ -144,13 +144,14 @@ public final class PushDecryptMessageJob extends BaseJob {
                                                                          .setCategory(NotificationCompat.CATEGORY_MESSAGE)
                                                                          .setContentTitle(context.getString(R.string.PushDecryptJob_new_locked_message))
                                                                          .setContentText(context.getString(R.string.PushDecryptJob_unlock_to_view_pending_messages))
-                                                                         .setContentIntent(PendingIntent.getActivity(context, 0, new Intent(context, MainActivity.class), 0))
+                                                                         .setContentIntent(PendingIntent.getActivity(context, 0, MainActivity.clearTop(context), 0))
                                                                          .setDefaults(NotificationCompat.DEFAULT_SOUND | NotificationCompat.DEFAULT_VIBRATE)
                                                                          .build());
 
   }
 
   private @NonNull List<Job> handleMessage(@NonNull SignalServiceEnvelope envelope) throws NoSenderException {
+    Log.i(TAG, "Processing message ID " + envelope.getTimestamp());
     try {
       SignalProtocolStore  axolotlStore = new SignalProtocolStoreImpl(context);
       SignalServiceAddress localAddress = new SignalServiceAddress(Optional.of(TextSecurePreferences.getLocalUuid(context)), Optional.of(TextSecurePreferences.getLocalNumber(context)));
@@ -171,7 +172,7 @@ public final class PushDecryptMessageJob extends BaseJob {
       return jobs;
 
     } catch (ProtocolInvalidVersionException e) {
-      Log.w(TAG, e);
+      Log.w(TAG, String.valueOf(envelope.getTimestamp()), e);
       return Collections.singletonList(new PushProcessMessageJob(PushProcessMessageJob.MessageState.INVALID_VERSION,
                                                                  toExceptionMetadata(e),
                                                                  messageId,
@@ -179,7 +180,7 @@ public final class PushDecryptMessageJob extends BaseJob {
                                                                  envelope.getTimestamp()));
 
     } catch (ProtocolInvalidMessageException | ProtocolInvalidKeyIdException | ProtocolInvalidKeyException | ProtocolUntrustedIdentityException e) {
-      Log.w(TAG, e);
+      Log.w(TAG, String.valueOf(envelope.getTimestamp()), e);
       return Collections.singletonList(new PushProcessMessageJob(PushProcessMessageJob.MessageState.CORRUPT_MESSAGE,
                                                                  toExceptionMetadata(e),
                                                                  messageId,
@@ -187,7 +188,7 @@ public final class PushDecryptMessageJob extends BaseJob {
                                                                  envelope.getTimestamp()));
 
     } catch (ProtocolNoSessionException e) {
-      Log.w(TAG, e);
+      Log.w(TAG, String.valueOf(envelope.getTimestamp()), e);
       return Collections.singletonList(new PushProcessMessageJob(PushProcessMessageJob.MessageState.NO_SESSION,
                                                                  toExceptionMetadata(e),
                                                                  messageId,
@@ -195,7 +196,7 @@ public final class PushDecryptMessageJob extends BaseJob {
                                                                  envelope.getTimestamp()));
 
     } catch (ProtocolLegacyMessageException e) {
-      Log.w(TAG, e);
+      Log.w(TAG, String.valueOf(envelope.getTimestamp()), e);
       return Collections.singletonList(new PushProcessMessageJob(PushProcessMessageJob.MessageState.LEGACY_MESSAGE,
                                                                  toExceptionMetadata(e),
                                                                  messageId,
@@ -203,7 +204,7 @@ public final class PushDecryptMessageJob extends BaseJob {
                                                                  envelope.getTimestamp()));
 
     } catch (ProtocolDuplicateMessageException e) {
-      Log.w(TAG, e);
+      Log.w(TAG, String.valueOf(envelope.getTimestamp()), e);
       return Collections.singletonList(new PushProcessMessageJob(PushProcessMessageJob.MessageState.DUPLICATE_MESSAGE,
                                                                  toExceptionMetadata(e),
                                                                  messageId,
@@ -211,7 +212,7 @@ public final class PushDecryptMessageJob extends BaseJob {
                                                                  envelope.getTimestamp()));
 
     } catch (InvalidMetadataVersionException | InvalidMetadataMessageException e) {
-      Log.w(TAG, e);
+      Log.w(TAG, String.valueOf(envelope.getTimestamp()), e);
       return Collections.emptyList();
 
     } catch (SelfSendException e) {
@@ -219,7 +220,7 @@ public final class PushDecryptMessageJob extends BaseJob {
       return Collections.emptyList();
 
     } catch (UnsupportedDataMessageException e) {
-      Log.w(TAG, e);
+      Log.w(TAG, String.valueOf(envelope.getTimestamp()), e);
       return Collections.singletonList(new PushProcessMessageJob(PushProcessMessageJob.MessageState.UNSUPPORTED_DATA_MESSAGE,
                                        toExceptionMetadata(e),
                                        messageId,
@@ -236,10 +237,13 @@ public final class PushDecryptMessageJob extends BaseJob {
     if (sender == null) throw new NoSenderException();
 
     GroupId groupId = null;
-    try {
-      groupId = GroupUtil.idFromGroupContext(e.getGroup().orNull());
-    } catch (BadGroupIdException ex) {
-      Log.w(TAG, "Bad group id found in unsupported data message", ex);
+
+    if (e.getGroup().isPresent()) {
+      try {
+        groupId = GroupUtil.idFromGroupContext(e.getGroup().get());
+      } catch (BadGroupIdException ex) {
+        Log.w(TAG, "Bad group id found in unsupported data message", ex);
+      }
     }
 
     return new PushProcessMessageJob.ExceptionMetadata(sender,

@@ -1,6 +1,5 @@
 package org.thoughtcrime.securesms.groups.ui.creategroup.details;
 
-import android.Manifest;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
@@ -20,7 +19,6 @@ import androidx.annotation.Nullable;
 import androidx.annotation.StringRes;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.widget.Toolbar;
-import androidx.fragment.app.Fragment;
 import androidx.lifecycle.ViewModelProviders;
 import androidx.vectordrawable.graphics.drawable.VectorDrawableCompat;
 
@@ -32,19 +30,23 @@ import com.dd.CircularProgressButton;
 import org.thoughtcrime.securesms.LoggingFragment;
 import org.thoughtcrime.securesms.R;
 import org.thoughtcrime.securesms.groups.ui.GroupMemberListView;
+import org.thoughtcrime.securesms.groups.ui.creategroup.dialogs.NonGv2MemberDialog;
 import org.thoughtcrime.securesms.mediasend.AvatarSelectionActivity;
 import org.thoughtcrime.securesms.mediasend.AvatarSelectionBottomSheetDialogFragment;
 import org.thoughtcrime.securesms.mediasend.Media;
 import org.thoughtcrime.securesms.mms.DecryptableStreamUriLoader;
 import org.thoughtcrime.securesms.mms.GlideApp;
-import org.thoughtcrime.securesms.permissions.Permissions;
 import org.thoughtcrime.securesms.profiles.AvatarHelper;
 import org.thoughtcrime.securesms.recipients.Recipient;
 import org.thoughtcrime.securesms.recipients.RecipientId;
 import org.thoughtcrime.securesms.util.BitmapUtil;
+import org.thoughtcrime.securesms.util.FeatureFlags;
 import org.thoughtcrime.securesms.util.ViewUtil;
 import org.thoughtcrime.securesms.util.text.AfterTextChanged;
+import org.thoughtcrime.securesms.util.views.LearnMoreTextView;
 
+import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 
 public class AddGroupDetailsFragment extends LoggingFragment {
@@ -89,6 +91,7 @@ public class AddGroupDetailsFragment extends LoggingFragment {
     GroupMemberListView members    = view.findViewById(R.id.member_list);
     ImageView           avatar     = view.findViewById(R.id.group_avatar);
     View                mmsWarning = view.findViewById(R.id.mms_warning);
+    LearnMoreTextView   gv2Warning = view.findViewById(R.id.gv2_warning);
 
     avatarPlaceholder = VectorDrawableCompat.create(getResources(), R.drawable.ic_camera_outline_32_ultramarine, requireActivity().getTheme());
 
@@ -113,9 +116,19 @@ public class AddGroupDetailsFragment extends LoggingFragment {
     viewModel.getCanSubmitForm().observe(getViewLifecycleOwner(), isFormValid -> setCreateEnabled(isFormValid, true));
     viewModel.getIsMms().observe(getViewLifecycleOwner(), isMms -> {
       mmsWarning.setVisibility(isMms ? View.VISIBLE : View.GONE);
-      name.setVisibility(isMms ? View.GONE : View.VISIBLE);
-      avatar.setVisibility(isMms ? View.GONE : View.VISIBLE);
+      name.setHint(isMms ? R.string.AddGroupDetailsFragment__group_name_optional : R.string.AddGroupDetailsFragment__group_name_required);
       toolbar.setTitle(isMms ? R.string.AddGroupDetailsFragment__create_group : R.string.AddGroupDetailsFragment__name_this_group);
+    });
+    viewModel.getNonGv2CapableMembers().observe(getViewLifecycleOwner(), nonGv2CapableMembers -> {
+      boolean forcedMigration = FeatureFlags.groupsV1ForcedMigration();
+
+      int stringRes = forcedMigration ? R.plurals.AddGroupDetailsFragment__d_members_do_not_support_new_groups_so_this_group_cannot_be_created
+                                      : R.plurals.AddGroupDetailsFragment__d_members_do_not_support_new_groups;
+
+      gv2Warning.setVisibility(nonGv2CapableMembers.isEmpty() ? View.GONE : View.VISIBLE);
+      gv2Warning.setText(requireContext().getResources().getQuantityString(stringRes, nonGv2CapableMembers.size(), nonGv2CapableMembers.size()));
+      gv2Warning.setLearnMoreVisible(true);
+      gv2Warning.setOnLinkClickListener(v -> NonGv2MemberDialog.showNonGv2Members(requireContext(), nonGv2CapableMembers, forcedMigration));
     });
     viewModel.getAvatar().observe(getViewLifecycleOwner(), avatarBytes -> {
       if (avatarBytes == null) {
@@ -170,7 +183,7 @@ public class AddGroupDetailsFragment extends LoggingFragment {
   private void initializeViewModel() {
     AddGroupDetailsFragmentArgs      args       = AddGroupDetailsFragmentArgs.fromBundle(requireArguments());
     AddGroupDetailsRepository        repository = new AddGroupDetailsRepository(requireContext());
-    AddGroupDetailsViewModel.Factory factory    = new AddGroupDetailsViewModel.Factory(args.getRecipientIds(), repository);
+    AddGroupDetailsViewModel.Factory factory    = new AddGroupDetailsViewModel.Factory(Arrays.asList(args.getRecipientIds()), repository);
 
     viewModel = ViewModelProviders.of(this, factory).get(AddGroupDetailsViewModel.class);
 
@@ -202,7 +215,7 @@ public class AddGroupDetailsFragment extends LoggingFragment {
   }
 
   private void handleGroupCreateResultSuccess(@NonNull GroupCreateResult.Success success) {
-    callback.onGroupCreated(success.getGroupRecipient().getId(), success.getThreadId());
+    callback.onGroupCreated(success.getGroupRecipient().getId(), success.getThreadId(), success.getInvitedMembers());
   }
 
   private void handleGroupCreateResultError(@NonNull GroupCreateResult.Error error) {
@@ -243,16 +256,12 @@ public class AddGroupDetailsFragment extends LoggingFragment {
   }
 
   private void showAvatarSelectionBottomSheet() {
-    Permissions.with(this)
-               .request(Manifest.permission.CAMERA, Manifest.permission.WRITE_EXTERNAL_STORAGE)
-               .ifNecessary()
-               .onAnyResult(() -> AvatarSelectionBottomSheetDialogFragment.create(viewModel.hasAvatar(), true, REQUEST_CODE_AVATAR, true)
-                                                                          .show(getChildFragmentManager(), "BOTTOM"))
-               .execute();
+    AvatarSelectionBottomSheetDialogFragment.create(viewModel.hasAvatar(), true, REQUEST_CODE_AVATAR, true)
+                                            .show(getChildFragmentManager(), "BOTTOM");
   }
 
   public interface Callback {
-    void onGroupCreated(@NonNull RecipientId recipientId, long threadId);
+    void onGroupCreated(@NonNull RecipientId recipientId, long threadId, @NonNull List<Recipient> invitedMembers);
     void onNavigationButtonPressed();
   }
 }

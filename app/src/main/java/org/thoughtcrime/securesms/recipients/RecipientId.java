@@ -1,6 +1,7 @@
 package org.thoughtcrime.securesms.recipients;
 
 import android.annotation.SuppressLint;
+import android.content.Context;
 import android.os.Parcel;
 import android.os.Parcelable;
 
@@ -11,14 +12,13 @@ import androidx.annotation.Nullable;
 import com.annimon.stream.Stream;
 
 import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
-import org.thoughtcrime.securesms.logging.Log;
 import org.thoughtcrime.securesms.util.DelimiterUtil;
 import org.thoughtcrime.securesms.util.Util;
 import org.whispersystems.signalservice.api.push.SignalServiceAddress;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
-import java.util.Locale;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -49,7 +49,16 @@ public class RecipientId implements Parcelable, Comparable<RecipientId> {
 
   @AnyThread
   public static @NonNull RecipientId from(@NonNull SignalServiceAddress address) {
-    return from(address.getUuid().orNull(), address.getNumber().orNull());
+    return from(address.getUuid().orNull(), address.getNumber().orNull(), false);
+  }
+
+  /**
+   * Indicates that the pairing is from a high-trust source.
+   * See {@link Recipient#externalHighTrustPush(Context, SignalServiceAddress)}
+   */
+  @AnyThread
+  public static @NonNull RecipientId fromHighTrust(@NonNull SignalServiceAddress address) {
+    return from(address.getUuid().orNull(), address.getNumber().orNull(), true);
   }
 
   /**
@@ -58,13 +67,24 @@ public class RecipientId implements Parcelable, Comparable<RecipientId> {
   @AnyThread
   @SuppressLint("WrongThread")
   public static @NonNull RecipientId from(@Nullable UUID uuid, @Nullable String e164) {
+    return from(uuid, e164, false);
+  }
+
+  @AnyThread
+  @SuppressLint("WrongThread")
+  private static @NonNull RecipientId from(@Nullable UUID uuid, @Nullable String e164, boolean highTrust) {
     RecipientId recipientId = RecipientIdCache.INSTANCE.get(uuid, e164);
 
     if (recipientId == null) {
-      recipientId = Recipient.externalPush(ApplicationDependencies.getApplication(), uuid, e164).getId();
+      recipientId = Recipient.externalPush(ApplicationDependencies.getApplication(), uuid, e164, highTrust).getId();
     }
 
     return recipientId;
+  }
+
+  @AnyThread
+  public static void clearCache() {
+    RecipientIdCache.INSTANCE.clear();
   }
 
   private RecipientId(long id) {
@@ -75,7 +95,7 @@ public class RecipientId implements Parcelable, Comparable<RecipientId> {
     id = in.readLong();
   }
 
-  public static @NonNull String toSerializedList(@NonNull List<RecipientId> ids) {
+  public static @NonNull String toSerializedList(@NonNull Collection<RecipientId> ids) {
     return Util.join(Stream.of(ids).map(RecipientId::serialize).toList(), String.valueOf(DELIMITER));
   }
 

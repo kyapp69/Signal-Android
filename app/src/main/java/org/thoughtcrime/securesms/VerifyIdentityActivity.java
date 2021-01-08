@@ -31,7 +31,6 @@ import android.graphics.PorterDuff;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.ColorDrawable;
 import android.os.AsyncTask;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Vibrator;
 import android.text.Html;
@@ -56,10 +55,12 @@ import android.widget.Toast;
 
 import androidx.annotation.DrawableRes;
 import androidx.annotation.NonNull;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.widget.SwitchCompat;
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentTransaction;
 
+import org.signal.core.util.logging.Log;
 import org.thoughtcrime.securesms.color.MaterialColor;
 import org.thoughtcrime.securesms.components.camera.CameraView;
 import org.thoughtcrime.securesms.crypto.IdentityKeyParcelable;
@@ -69,7 +70,6 @@ import org.thoughtcrime.securesms.database.IdentityDatabase;
 import org.thoughtcrime.securesms.database.IdentityDatabase.VerifiedStatus;
 import org.thoughtcrime.securesms.dependencies.ApplicationDependencies;
 import org.thoughtcrime.securesms.jobs.MultiDeviceVerifiedUpdateJob;
-import org.thoughtcrime.securesms.logging.Log;
 import org.thoughtcrime.securesms.permissions.Permissions;
 import org.thoughtcrime.securesms.qr.QrCode;
 import org.thoughtcrime.securesms.qr.ScanListener;
@@ -85,6 +85,7 @@ import org.thoughtcrime.securesms.util.IdentityUtil;
 import org.thoughtcrime.securesms.util.TextSecurePreferences;
 import org.thoughtcrime.securesms.util.Util;
 import org.thoughtcrime.securesms.util.ViewUtil;
+import org.thoughtcrime.securesms.util.WindowUtil;
 import org.whispersystems.libsignal.IdentityKey;
 import org.whispersystems.libsignal.fingerprint.Fingerprint;
 import org.whispersystems.libsignal.fingerprint.FingerprintParsingException;
@@ -224,9 +225,7 @@ public class VerifyIdentityActivity extends PassphraseRequiredActivity implement
   private void setActionBarNotificationBarColor(MaterialColor color) {
     getSupportActionBar().setBackgroundDrawable(new ColorDrawable(color.toActionBarColor(this)));
 
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-      getWindow().setStatusBarColor(color.toStatusBarColor(this));
-    }
+    WindowUtil.setStatusBarColor(getWindow(), color.toStatusBarColor(this));
   }
 
   public static class VerifyDisplayFragment extends Fragment implements CompoundButton.OnCheckedChangeListener {
@@ -259,24 +258,24 @@ public class VerifyIdentityActivity extends PassphraseRequiredActivity implement
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, ViewGroup viewGroup, Bundle bundle) {
       this.container        = ViewUtil.inflate(inflater, viewGroup, R.layout.verify_display_fragment);
-      this.numbersContainer = ViewUtil.findById(container, R.id.number_table);
-      this.qrCode           = ViewUtil.findById(container, R.id.qr_code);
-      this.verified         = ViewUtil.findById(container, R.id.verified_switch);
-      this.qrVerified       = ViewUtil.findById(container, R.id.qr_verified);
-      this.description      = ViewUtil.findById(container, R.id.description);
-      this.tapLabel         = ViewUtil.findById(container, R.id.tap_label);
-      this.codes[0]         = ViewUtil.findById(container, R.id.code_first);
-      this.codes[1]         = ViewUtil.findById(container, R.id.code_second);
-      this.codes[2]         = ViewUtil.findById(container, R.id.code_third);
-      this.codes[3]         = ViewUtil.findById(container, R.id.code_fourth);
-      this.codes[4]         = ViewUtil.findById(container, R.id.code_fifth);
-      this.codes[5]         = ViewUtil.findById(container, R.id.code_sixth);
-      this.codes[6]         = ViewUtil.findById(container, R.id.code_seventh);
-      this.codes[7]         = ViewUtil.findById(container, R.id.code_eighth);
-      this.codes[8]         = ViewUtil.findById(container, R.id.code_ninth);
-      this.codes[9]         = ViewUtil.findById(container, R.id.code_tenth);
-      this.codes[10]        = ViewUtil.findById(container, R.id.code_eleventh);
-      this.codes[11]        = ViewUtil.findById(container, R.id.code_twelth);
+      this.numbersContainer = container.findViewById(R.id.number_table);
+      this.qrCode           = container.findViewById(R.id.qr_code);
+      this.verified         = container.findViewById(R.id.verified_switch);
+      this.qrVerified       = container.findViewById(R.id.qr_verified);
+      this.description      = container.findViewById(R.id.description);
+      this.tapLabel         = container.findViewById(R.id.tap_label);
+      this.codes[0]         = container.findViewById(R.id.code_first);
+      this.codes[1]         = container.findViewById(R.id.code_second);
+      this.codes[2]         = container.findViewById(R.id.code_third);
+      this.codes[3]         = container.findViewById(R.id.code_fourth);
+      this.codes[4]         = container.findViewById(R.id.code_fifth);
+      this.codes[5]         = container.findViewById(R.id.code_sixth);
+      this.codes[6]         = container.findViewById(R.id.code_seventh);
+      this.codes[7]         = container.findViewById(R.id.code_eighth);
+      this.codes[8]         = container.findViewById(R.id.code_ninth);
+      this.codes[9]         = container.findViewById(R.id.code_tenth);
+      this.codes[10]        = container.findViewById(R.id.code_eleventh);
+      this.codes[11]        = container.findViewById(R.id.code_twelth);
 
       this.qrCode.setOnClickListener(clickListener);
       this.registerForContextMenu(numbersContainer);
@@ -307,16 +306,26 @@ public class VerifyIdentityActivity extends PassphraseRequiredActivity implement
       byte[] localId;
       byte[] remoteId;
 
-      if (FeatureFlags.uuidOnlyContacts() && recipient.resolve().getUuid().isPresent()) {
+      Recipient resolved = recipient.resolve();
+
+      if (FeatureFlags.verifyV2() && resolved.getUuid().isPresent()) {
         Log.i(TAG, "Using UUID (version 2).");
         version  = 2;
         localId  = UuidUtil.toByteArray(TextSecurePreferences.getLocalUuid(requireContext()));
-        remoteId = UuidUtil.toByteArray(recipient.resolve().getUuid().get());
-      } else {
+        remoteId = UuidUtil.toByteArray(resolved.getUuid().get());
+      } else if (!FeatureFlags.verifyV2() && resolved.getE164().isPresent()) {
         Log.i(TAG, "Using E164 (version 1).");
         version  = 1;
         localId  = TextSecurePreferences.getLocalNumber(requireContext()).getBytes();
-        remoteId = recipient.resolve().requireE164().getBytes();
+        remoteId = resolved.requireE164().getBytes();
+      } else {
+        Log.w(TAG, String.format(Locale.ENGLISH, "Could not show proper verification! verifyV2: %s, hasUuid: %s, hasE164: %s", FeatureFlags.verifyV2(), resolved.getUuid().isPresent(), resolved.getE164().isPresent()));
+        new AlertDialog.Builder(requireContext())
+                       .setMessage(getString(R.string.VerifyIdentityActivity_you_must_first_exchange_messages_in_order_to_view, resolved.getDisplayName(requireContext())))
+                       .setPositiveButton(android.R.string.ok, (dialog, which) -> requireActivity().finish())
+                       .setOnDismissListener(dialog -> requireActivity().finish())
+                       .show();
+        return;
       }
 
       this.recipient.observe(this, this::setRecipientText);
@@ -655,7 +664,7 @@ public class VerifyIdentityActivity extends PassphraseRequiredActivity implement
 
     public View onCreateView(@NonNull LayoutInflater inflater, ViewGroup viewGroup, Bundle bundle) {
       this.container  = ViewUtil.inflate(inflater, viewGroup, R.layout.verify_scan_fragment);
-      this.cameraView = ViewUtil.findById(container, R.id.scanner);
+      this.cameraView = container.findViewById(R.id.scanner);
 
       return container;
     }

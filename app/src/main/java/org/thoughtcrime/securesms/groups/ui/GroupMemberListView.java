@@ -9,14 +9,17 @@ import androidx.annotation.Nullable;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
+import com.annimon.stream.Stream;
+
 import org.thoughtcrime.securesms.R;
+import org.thoughtcrime.securesms.recipients.Recipient;
 
 import java.util.List;
 
 public final class GroupMemberListView extends RecyclerView {
 
-  private final GroupMemberListAdapter membersAdapter = new GroupMemberListAdapter();
-  private       int                    maxHeight;
+  private GroupMemberListAdapter membersAdapter;
+  private int                    maxHeight;
 
   public GroupMemberListView(@NonNull Context context) {
     super(context);
@@ -38,17 +41,20 @@ public final class GroupMemberListView extends RecyclerView {
       setHasFixedSize(true);
     }
 
-    setLayoutManager(new LinearLayoutManager(context));
-    setAdapter(membersAdapter);
-
+    boolean selectable = false;
     if (attrs != null) {
       TypedArray typedArray = context.getTheme().obtainStyledAttributes(attrs, R.styleable.GroupMemberListView, 0, 0);
       try {
         maxHeight = typedArray.getDimensionPixelSize(R.styleable.GroupMemberListView_maxHeight, 0);
+        selectable = typedArray.getBoolean(R.styleable.GroupMemberListView_selectable, false);
       } finally {
         typedArray.recycle();
       }
     }
+
+    membersAdapter = new GroupMemberListAdapter(selectable);
+    setLayoutManager(new LinearLayoutManager(context));
+    setAdapter(membersAdapter);
   }
 
   public void setAdminActionsListener(@Nullable AdminActionsListener adminActionsListener) {
@@ -63,8 +69,16 @@ public final class GroupMemberListView extends RecyclerView {
     membersAdapter.setRecipientLongClickListener(listener);
   }
 
+  public void setRecipientSelectionChangeListener(@Nullable RecipientSelectionChangeListener listener) {
+    membersAdapter.setRecipientSelectionChangeListener(listener);
+  }
+
   public void setMembers(@NonNull List<? extends GroupMemberEntry> recipients) {
     membersAdapter.updateData(recipients);
+  }
+
+  public void setDisplayOnlyMembers(@NonNull List<Recipient> recipients) {
+    membersAdapter.updateData(Stream.of(recipients).map(r -> new GroupMemberEntry.FullMember(r, false)).toList());
   }
 
   @Override
